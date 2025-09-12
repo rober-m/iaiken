@@ -1,6 +1,8 @@
 use crate::messages::{
-    ConnectionConfig, HelpLinks, JupyterMessage, KernelInfoReply, LanguageInfo, MessageHeader,
+    ConnectionConfig, ExecuteReply, ExecuteRequest, HelpLink, JupyterMessage, KernelInfoReply,
+    LanguageInfo, MessageHeader,
 };
+use hmac::Mac;
 use std::fs;
 use zeromq::{Socket, SocketRecv, SocketSend};
 
@@ -53,14 +55,23 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                         JupyterMessage::<serde_json::Value>::from_multipart(&frames)
                     {
                         println!("Received message type: {}", raw_msg.header.msg_type);
+                        println!(
+                            "Incoming HMAC was: {}",
+                            std::str::from_utf8(&frames[2]).unwrap_or("invalid")
+                        );
 
                         // Route based on message type
                         match raw_msg.header.msg_type.as_str() {
                             "kernel_info_request" => {
+                                println!(
+                                    "Received kernel_info_request with raw_msg: {}",
+                                    raw_msg.header.version
+                                );
                                 // Handle kernel info request
                                 let reply = KernelInfoReply {
                                     status: "ok".to_string(),
-                                    protocol_version: "5.4".to_string(),
+                                    //protocol_version: "5.3".to_string(),
+                                    protocol_version: raw_msg.header.version.clone(), // Match request version? (is this ok?)
                                     implementation: "aiken".to_string(),
                                     implementation_version: "1.0.0".to_string(), // TODO
                                     language_info: LanguageInfo {
@@ -76,7 +87,8 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     },
                                     banner: "Aiken Kernel v0.1.0\nCardano Smart Contract Language"
                                         .to_string(), //TODO
-                                    help_links: vec![HelpLinks {
+                                    debugger: false,
+                                    help_links: vec![HelpLink {
                                         text: "Aiken Documentation".to_string(),
                                         url: "https://aiken-lang.org/".to_string(),
                                     }],
@@ -90,8 +102,16 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     username: "kernel".to_string(),
                                     date: chrono::Utc::now().to_rfc3339(),
                                     msg_type: "kernel_info_reply".to_string(),
-                                    version: "5.4".to_string(),
+                                    //version: "5.3".to_string(),
+                                    version: raw_msg.header.version.clone(), // Match request version?
                                 };
+
+                                println!("Sending reply with version: {}", &reply_header.version);
+                                println!(
+                                    "Reply content: {}",
+                                    serde_json::to_string_pretty(&reply)
+                                        .unwrap_or("serialize error".to_string())
+                                );
 
                                 // Create reply message
                                 let reply_msg = JupyterMessage {
@@ -102,7 +122,23 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                 };
 
                                 // Convert to ZMQ frames
-                                if let Ok(frames) = reply_msg.to_multipart() {
+                                if let Ok(frames) =
+                                    reply_msg.to_multipart(Some(&frames[0]), &config.key)
+                                {
+                                    // Debug the actual frames being sent
+                                    println!("Debug: Sending {} frames", frames.len());
+                                    for (i, frame) in frames.iter().enumerate() {
+                                        if let Ok(text) = std::str::from_utf8(frame) {
+                                            println!("Outgoing Frame {}: {}", i, text);
+                                        } else {
+                                            println!(
+                                                "Outgoing Frame {}: {} bytes (binary)",
+                                                i,
+                                                frame.len()
+                                            );
+                                        }
+                                    }
+
                                     // Convert Vec<Vec<u8>> to Vec<Bytes>
                                     let bytes_frames: Vec<bytes::Bytes> =
                                         frames.into_iter().map(|frame| frame.into()).collect();
@@ -125,16 +161,77 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                 }
                             }
                             "execute_request" => {
-                                // Handle code execution
                                 println!("Handling execute_request");
-                                // TODO: Send execute_reply
+                                // Parse the execute request
+                                if let Ok(exec_msg) =
+                                    JupyterMessage::<ExecuteRequest>::from_multipart(&frames)
+                                {
+                                    println!("Executing code: {}", exec_msg.content.code);
+
+                                    // For now, just echo the code back as output
+                                    // TODO: Actually compile/execute Aiken code
+
+                                    // Create execute reply
+                                    let reply = ExecuteReply {
+                                        status: "ok".to_string(),
+                                        execution_count: 1, // TODO: Track this properly
+                                        user_expressions: None,
+                                    };
+
+                                    // Build reply message (same pattern as kernel_info_reply)
+                                    let reply_header = MessageHeader {
+                                        msg_id: uuid::Uuid::new_v4().to_string(),
+                                        session: raw_msg.header.session.clone(),
+                                        username: "kernel".to_string(),
+                                        date: chrono::Utc::now().to_rfc3339(),
+                                        msg_type: "execute_reply".to_string(),
+                                        version: "5.3".to_string(),
+                                    };
+
+                                    let reply_msg = JupyterMessage {
+                                        header: reply_header,
+                                        parent_header: Some(raw_msg.header.clone()),
+                                        metadata: serde_json::Value::Object(serde_json::Map::new()),
+                                        content: reply,
+                                    };
+
+                                    // Send execute_reply through shell socket
+                                    if let Ok(reply_frames) =
+                                        reply_msg.to_multipart(Some(&frames[0]), &config.key)
+                                    {
+                                        let bytes_frames: Vec<bytes::Bytes> = reply_frames
+                                            .into_iter()
+                                            .map(|frame| frame.into())
+                                            .collect();
+
+                                        match zeromq::ZmqMessage::try_from(bytes_frames) {
+                                            Ok(zmq_msg) => {
+                                                if let Err(e) = shell_socket.send(zmq_msg).await {
+                                                    eprintln!("Failed to send execute_reply: {e}");
+                                                } else {
+                                                    println!("Sent execute_reply successfully!");
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Failed to create execute_reply ZmqMessage: {e}");
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             _ => {
                                 println!("Unknown message type: {}", raw_msg.header.msg_type);
                             }
                         }
                     } else {
-                        println!("Failed to parse message");
+                        println!("Failed to parse message with {} frames", frames.len());
+                        for (i, frame) in frames.iter().enumerate() {
+                            if let Ok(text) = std::str::from_utf8(frame) {
+                                println!("Frame {i}: {text}");
+                            } else {
+                                println!("Frame {}: {} bytes (binary)", i, frame.len());
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -172,4 +269,62 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+pub fn sign_message(
+    key: &str,
+    header: &[u8],
+    parent_header: &[u8],
+    metadata: &[u8],
+    content: &[u8],
+) -> String {
+    // println!("HMAC key being used: '{}'", key);
+    // println!("HMAC key length: {}", key.len());
+    //
+    // // Debug: Print what we're signing
+    // println!("Header bytes length: {}", header.len());
+    // println!("Parent header bytes length: {}", parent_header.len());
+    // println!("Metadata bytes length: {}", metadata.len());
+    // println!("Content bytes length: {}", content.len());
+    //
+    // // Show actual JSON being signed
+    // println!(
+    //     "Header JSON: {}",
+    //     std::str::from_utf8(header).unwrap_or("invalid")
+    // );
+    // println!(
+    //     "Parent header JSON: {}",
+    //     std::str::from_utf8(parent_header).unwrap_or("invalid")
+    // );
+    // println!(
+    //     "Metadata JSON: {}",
+    //     std::str::from_utf8(metadata).unwrap_or("invalid")
+    // );
+    //
+    // // Decode the hex key to bytes
+    // let key_bytes = match hex::decode(key.replace("-", "")) {
+    //     Ok(bytes) => bytes,
+    //     Err(_) => {
+    //         // If hex decode fails, use the key as-is (fallback)
+    //         println!("Warning: Could not decode key as hex, using as string");
+    //         key.as_bytes().to_vec()
+    //     }
+    // };
+    //
+    // println!("Decoded key length: {}", key_bytes.len());
+    //
+    // let mut mac: HmacSha256 = HmacSha256::new_from_slice(&key_bytes).expect("HMAC key error");
+    // mac.update(header);
+    // mac.update(parent_header);
+    // mac.update(metadata);
+    // mac.update(content);
+    // let result = hex::encode(mac.finalize().into_bytes());
+    //
+    // println!("Generated HMAC: {}", result);
+    //return result
+
+    // WARN: Debugging HMAC signature, delete this afterwards
+    String::new()
 }
