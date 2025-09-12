@@ -13,11 +13,67 @@ pub struct MessageHeader {
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#general-message-format
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct JupyerMessage<T> {
+pub struct JupyterMessage<T> {
     pub header: MessageHeader,                // Header for this message
     pub parent_header: Option<MessageHeader>, // Header of the parent message
     pub metadata: serde_json::Value,          // Metadata for this message
     pub content: T,                           // Content specific to the message type
+}
+
+impl<T> JupyterMessage<T> 
+where
+    T: serde::de::DeserializeOwned, 
+    {
+        pub fn from_multipart(frames: &[Vec<u8>]) -> anyhow::Result<Self>{
+            if frames.len() < 6 {
+                return Err(anyhow::anyhow!("Invalid message format: Too few frames!"));
+            }
+
+            // Skip identity and delimiter frames (first 2)
+            // Skip HMAC frame (frame 2) for now
+            let header: MessageHeader = serde_json::from_slice(&frames[3])?;
+            let parent_header: Option<MessageHeader> = if frames[4].is_empty() {
+                None
+            } else {
+                Some(serde_json::from_slice(&frames[4])?)
+            };
+
+            let metadata: serde_json::Value = serde_json::from_slice(&frames[5])?;
+            let content: T = serde_json::from_slice(&frames[6])?;
+            Ok(JupyterMessage { header, parent_header, metadata, content })
+        }
+    }
+
+impl<T> JupyterMessage<T>
+  where
+      T: serde::Serialize,
+{
+      pub fn to_multipart(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+          let mut frames = Vec::new();
+
+          // Frame 0: Identity (empty for now)
+          frames.push(b"kernel".to_vec());
+
+          // Frame 1: Delimiter
+          frames.push(b"<IDS|MSG>".to_vec());
+
+          // Frame 2: HMAC signature (empty for now)
+          frames.push(Vec::new());
+
+          // Frame 3: Header
+          frames.push(serde_json::to_vec(&self.header)?);
+
+          // Frame 4: Parent header
+          frames.push(serde_json::to_vec(&self.parent_header)?);
+
+          // Frame 5: Metadata
+          frames.push(serde_json::to_vec(&self.metadata)?);
+
+          // Frame 6: Content
+          frames.push(serde_json::to_vec(&self.content)?);
+
+          Ok(frames)
+      }
 }
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#execute
@@ -100,3 +156,30 @@ pub struct HelpLinks {
     pub text: String,
     pub url: String,
 }
+
+
+// Kernel specification for installation
+// DOCS: https://jupyter-client.readthedocs.io/en/latest/kernels.html#kernel-specs
+  #[derive(Serialize, Deserialize, Debug)]
+  pub struct KernelSpec {
+      pub argv: Vec<String>,     // A list of command line arguments used to start the kernel
+      pub display_name: String,  // The kernel’s name as it should be displayed in the UI
+      pub language: String,      // The name of the language of the kernel
+      #[serde(skip_serializing_if = "Option::is_none")]
+      pub env: Option<std::collections::HashMap<String, String>>, // A dictionary of environment variables to set for the kernel
+  }
+
+impl KernelSpec {
+      pub fn new(executable_path: &str) -> Self {
+          Self {
+              argv: vec![
+                  executable_path.to_string(),
+                  "--connection-file".to_string(),
+                  "{connection_file}".to_string(),
+              ],
+              display_name: "Aiken".to_string(),
+              language: "aiken".to_string(),
+              env: None,
+          }
+      }
+  }

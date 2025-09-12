@@ -1,5 +1,6 @@
 mod connection;
 mod messages;
+mod kernel;
 
 use clap::Parser;
 
@@ -20,12 +21,6 @@ pub struct Cli {
     pub uninstall: bool,
 }
 
-fn install_kernel() -> anyhow::Result<()> {
-    println!("Installing Aiken kernell");
-    // TODO: Create kernel.json spec file
-    Ok(())
-}
-
 fn uninstall_kernel() -> anyhow::Result<()> {
     println!("uninstalling Aiken kernell");
     // TODO: Remove kernel.json spec file
@@ -38,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
 
     match (cli.connection_file, cli.install, cli.uninstall) {
         (Some(file), false, false) => connection::run_kernel(file).await,
-        (None, true, false) => install_kernel(),
+        (None, true, false) => kernel::install_kernel(),
         (None, false, true) => uninstall_kernel(),
         _ => {
             eprintln!("Usage: aiken-kernel --connection-file=<file> | --install | --uninstall");
