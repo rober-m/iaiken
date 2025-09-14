@@ -1,7 +1,10 @@
-use crate::connection::sign_message;
+use crate::messages::crypto::sign_message;
+use crate::messages::kernel_info::PROTOCOL_VERSION;
 use serde::{Deserialize, Serialize};
 
-const PROTOCOL_VERSION: &str = "5.3";
+pub mod crypto;
+pub mod execute;
+pub mod kernel_info;
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#message-header
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -36,10 +39,7 @@ pub struct JupyterMessage<T> {
     pub content: T,                           // Content specific to the message type
 }
 
-impl<T> JupyterMessage<T>
-where
-    T: serde::de::DeserializeOwned,
-{
+impl<T: serde::de::DeserializeOwned> JupyterMessage<T> {
     pub fn from_multipart(
         frames: &[Vec<u8>],
         config_key: &str,
@@ -47,7 +47,7 @@ where
     ) -> anyhow::Result<Self> {
         let delim_index = delim_index(frames)?;
 
-        if frames.len() < delim_index + 5 {
+        if frames.len() < delim_index + 6 {
             return Err(anyhow::anyhow!(
                 "Invalid message format: Only {} frames!",
                 frames.len()
@@ -59,17 +59,17 @@ where
         let metadata_bytes = &frames[delim_index + 4];
         let content_bytes = &frames[delim_index + 5];
 
-        verify_incoming_hmac(frames, config_key, config_signature_scheme, delim_index);
+        crypto::verify_incoming_hmac(frames, config_key, config_signature_scheme, delim_index)?;
 
         // Skip identity and delimiter frames (first 2)
         // Skip HMAC frame (frame 2) for now
         let header: MessageHeader = serde_json::from_slice(header_bytes)?;
-        let parent_header: Option<MessageHeader> = if frames[4].is_empty() || parent_bytes == b"{}"
-        {
-            None
-        } else {
-            Some(serde_json::from_slice(parent_bytes)?)
-        };
+        let parent_header: Option<MessageHeader> =
+            if parent_bytes.is_empty() || parent_bytes == b"{}" {
+                None
+            } else {
+                Some(serde_json::from_slice(parent_bytes)?)
+            };
 
         let metadata: serde_json::Value = if metadata_bytes.is_empty() || metadata_bytes == b"{}" {
             serde_json::Value::Object(serde_json::Map::new())
@@ -92,68 +92,83 @@ where
     }
 }
 
-impl<T> JupyterMessage<T>
-where
-    T: serde::Serialize,
-{
-    pub fn to_multipart(
+impl<T: serde::Serialize> JupyterMessage<T> {
+    pub fn to_envelope_multipart(
         &self,
-        identity: Option<&[u8]>,
-        signing_key: &str,
-        config_signature_scheme: &str,
-    ) -> anyhow::Result<Vec<Vec<u8>>> {
-        // Serialize the message parts first
-        let header_bytes = serde_json::to_vec(&self.header)?;
-        let parent_header_bytes = serde_json::to_vec(&self.parent_header)?;
-        let metadata_bytes = serde_json::to_vec(&self.metadata)?;
-        let content_bytes = serde_json::to_vec(&self.content)?;
+        frames: Vec<Vec<u8>>,
+        delim_index: usize,
+        key: &str,
+        scheme: &str,
+    ) -> anyhow::Result<Vec<bytes::Bytes>> {
+        // Serialize parts
+        let header_bytes = serde_json::to_vec(&self.header).unwrap();
+        let parent_header_bytes = serde_json::to_vec(&self.parent_header).unwrap();
+        let metadata_bytes = serde_json::to_vec(&self.metadata).unwrap();
+        let content_bytes = serde_json::to_vec(&self.content).unwrap();
 
-        Ok(vec![
-            // Frame 0: Use provided identity or default
-            identity
-                .map(|id| id.to_vec())
-                .unwrap_or_else(|| b"kernel".to_vec()),
-            // Frame 1: Delimiter
-            b"<IDS|MSG>".to_vec(),
-            // Frame 2: HMAC signature
-            sign_message(
-                signing_key,
-                config_signature_scheme,
-                &header_bytes,
-                &parent_header_bytes,
-                &metadata_bytes,
-                &content_bytes,
-            )
-            .into_bytes(),
-            // Frame 3: Header
-            header_bytes,
-            // Frame 4: Parent header
-            parent_header_bytes,
-            // Frame 5: Metadata
-            metadata_bytes,
-            // Frame 6: Content
-            content_bytes,
-        ])
+        // Compute HMAC
+        let sig = sign_message(
+            key,
+            scheme,
+            &header_bytes,
+            &parent_header_bytes,
+            &metadata_bytes,
+            &content_bytes,
+        )
+        .into_bytes();
+
+        // Build outgoing frames
+        let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(delim_index + 6);
+        out_frames.extend_from_slice(&frames[..=delim_index]);
+        out_frames.push(sig);
+        out_frames.push(header_bytes);
+        out_frames.push(parent_header_bytes);
+        out_frames.push(metadata_bytes);
+        out_frames.push(content_bytes);
+
+        Ok(out_frames.into_iter().map(|frame| frame.into()).collect())
     }
-}
 
-// DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#execute
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ExecuteRequest {
-    pub code: String,                        // Source code to be executed by the kernel
-    pub silent: bool,                        // If true, execute as quietly as possible
-    pub store_history: bool,                 // If true, store this execution in the history
-    pub user_expressions: serde_json::Value, // Mapping of names to expressions to evaluate after execution
-    pub allow_stdin: bool, // If true, code running in the kernel can prompt the user for input
-    pub stop_on_error: bool, // If true, aborts the execution queue if an exception is encountered.
-}
+    pub fn to_iopub_multipart(
+        &self,
+        key: &str,
+        signature_scheme: &str,
+        status: String,
+    ) -> anyhow::Result<Vec<bytes::Bytes>> {
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ExecuteReply {
-    pub status: String,       // "ok" or "error"
-    pub execution_count: u32, // Incremental counter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_expressions: Option<serde_json::Value>,
+        // Create message parts
+        let status_header = MessageHeader::new(self.header.session.clone(), "status".to_string());
+        let parent_header = Some(self.header.clone());
+        let metadata = serde_json::Value::Object(serde_json::Map::new());
+        let content = serde_json::json!({"execution_state": status});
+
+        // Serialize parts
+        let header_bytes = serde_json::to_vec(&status_header)?;
+        let parent_header_bytes = serde_json::to_vec(&parent_header)?;
+        let metadata_bytes = serde_json::to_vec(&metadata)?;
+        let content_bytes = serde_json::to_vec(&content)?;
+
+        let sig = sign_message(
+            key,
+            signature_scheme,
+            &header_bytes,
+            &parent_header_bytes,
+            &metadata_bytes,
+            &content_bytes,
+        )
+        .into_bytes();
+
+        let out_frames = vec![
+            b"<IDS|MSG>".to_vec(),
+            sig,
+            header_bytes,
+            parent_header_bytes,
+            metadata_bytes,
+            content_bytes,
+        ];
+
+        Ok(out_frames.into_iter().map(|frame| frame.into()).collect())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -191,68 +206,6 @@ impl ConnectionConfig {
     }
 }
 
-// DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#kernel-info
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct KernelInfoRequest {}
-
-// DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#kernel-info
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct KernelInfoReply {
-    pub status: String, // 'ok' if the request succeeded or 'error', with error information
-    pub protocol_version: String, // Version of messaging protocol. Format X.Y.Z
-    pub implementation: String, // The kernel implementation name
-    pub implementation_version: String, // The kernel implementation version. Format X.Y.Z
-    pub language_info: LanguageInfo,
-    pub banner: String, // A banner of information about the kernel
-    pub debugger: bool, // if the kernel supports debugging in the notebook.
-    pub help_links: Vec<HelpLink>,
-    pub supported_features: Option<Vec<String>>, // A list of optional features such as 'debugger' and 'kernel subshells'.
-}
-
-// DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#kernel-info
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LanguageInfo {
-    pub name: String,     // Name of the programming language that the kernel implements
-    pub version: String,  // Language version number. Format X.Y.Z
-    pub mimetype: String, // mimetype for script files in this language
-    pub file_extension: String, // Extension including the dot, e.g. '.py' or '.ak'
-    pub pygments_lexer: Option<String>, // Pygments lexer, for highlighting. Only needed if it differs from the 'name' field.
-    pub codemirror_mode: Option<serde_json::Value>, // Codemirror mode, for highlighting in the notebook.. Only needed if it differs from the 'name' field.
-    pub nbconvert_exporter: String,                 // Nbconvert exporter
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HelpLink {
-    pub text: String,
-    pub url: String,
-}
-
-// Kernel specification for installation
-// DOCS: https://jupyter-client.readthedocs.io/en/latest/kernels.html#kernel-specs
-#[derive(Serialize, Deserialize, Debug)]
-pub struct KernelSpec {
-    pub argv: Vec<String>, // A list of command line arguments used to start the kernel
-    pub display_name: String, // The kernel’s name as it should be displayed in the UI
-    pub language: String,  // The name of the language of the kernel
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<std::collections::HashMap<String, String>>, // A dictionary of environment variables to set for the kernel
-}
-
-impl KernelSpec {
-    pub fn new(executable_path: &str) -> Self {
-        Self {
-            argv: vec![
-                executable_path.to_string(),
-                "--connection-file".to_string(),
-                "{connection_file}".to_string(),
-            ],
-            display_name: "Aiken".to_string(),
-            language: "aiken".to_string(),
-            env: None,
-        }
-    }
-}
-
 // Find the <IDS|MSG> delimiter to support variable identity envelope
 pub fn delim_index(frames: &[Vec<u8>]) -> anyhow::Result<usize> {
     match frames.iter().position(|f| f.as_slice() == b"<IDS|MSG>") {
@@ -261,35 +214,5 @@ pub fn delim_index(frames: &[Vec<u8>]) -> anyhow::Result<usize> {
             "Malformed message: missing <IDS|MSG> delimiter with {} frames",
             frames.len()
         )),
-    }
-}
-
-pub fn verify_incoming_hmac(
-    frames: &[Vec<u8>],
-    config_key: &str,
-    config_signature_scheme: &str,
-    delim_index: usize,
-) {
-    if config_key.is_empty() {
-        println!("Empty config key, skipping HMAC check")
-    } else {
-        let incoming_sig = std::str::from_utf8(&frames[delim_index + 1]).unwrap_or("invalid");
-        // Recompute signature over received header/parent/metadata/content
-        let header_bytes = &frames[delim_index + 2];
-        let parent_bytes = &frames[delim_index + 3];
-        let metadata_bytes = &frames[delim_index + 4];
-        let content_bytes = &frames[delim_index + 5];
-        let expected_sig = sign_message(
-            config_signature_scheme,
-            config_key,
-            header_bytes,
-            parent_bytes,
-            metadata_bytes,
-            content_bytes,
-        );
-        println!("Incoming HMAC was: {}", incoming_sig);
-        if incoming_sig != expected_sig {
-            eprintln!("Warning: incoming HMAC mismatch");
-        }
     }
 }
