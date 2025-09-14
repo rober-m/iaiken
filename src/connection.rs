@@ -1,6 +1,5 @@
 use crate::messages::{
-    ConnectionConfig, ExecuteReply, ExecuteRequest, HelpLink, JupyterMessage, KernelInfoReply,
-    LanguageInfo, MessageHeader,
+    delim_index, ConnectionConfig, ExecuteReply, ExecuteRequest, HelpLink, JupyterMessage, KernelInfoReply, LanguageInfo, MessageHeader
 };
 use hmac::Mac;
 use std::fs;
@@ -51,45 +50,16 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                 Ok(message) => {
                     // Try to parse as a generic message first to get the header
                     let frames: Vec<Vec<u8>> = message.iter().map(|frame| frame.to_vec()).collect();
-
-                    // Find the <IDS|MSG> delimiter to support variable identity envelope
-                    let delim_index = match frames.iter().position(|f| f.as_slice() == b"<IDS|MSG>")
-                    {
-                        Some(i) => i,
-                        None => {
-                            eprintln!(
-                                "Malformed message: missing <IDS|MSG> delimiter with {} frames",
-                                frames.len()
-                            );
-                            continue;
-                        }
+                    let delim_index = match delim_index(&frames) {
+                        Ok(ix) => ix,
+                        Err(e) => { eprintln!("{e}"); continue; }
                     };
 
-                    // Verify incoming HMAC if present
-                    if frames.len() > delim_index + 5 {
-                        let incoming_sig =
-                            std::str::from_utf8(&frames[delim_index + 1]).unwrap_or("invalid");
-                        // Recompute signature over received header/parent/metadata/content
-                        let header_bytes = &frames[delim_index + 2];
-                        let parent_bytes = &frames[delim_index + 3];
-                        let metadata_bytes = &frames[delim_index + 4];
-                        let content_bytes = &frames[delim_index + 5];
-                        let expected_sig = sign_message(
-                            &config.key,
-                            header_bytes,
-                            parent_bytes,
-                            metadata_bytes,
-                            content_bytes,
-                        );
-                        println!("Incoming HMAC was: {}", incoming_sig);
-                        if !config.key.is_empty() && incoming_sig != expected_sig {
-                            eprintln!("Warning: incoming HMAC mismatch");
-                        }
-                    }
-
-                    if let Ok(raw_msg) =
-                        JupyterMessage::<serde_json::Value>::from_multipart(&frames)
-                    {
+                    if let Ok(raw_msg) = JupyterMessage::<serde_json::Value>::from_multipart(
+                        &frames,
+                        &config.key,
+                        &config.signature_scheme,
+                    ) {
                         println!("Received message type: {}", raw_msg.header.msg_type);
 
                         // Route based on message type
@@ -128,54 +98,19 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                 };
 
                                 // Build reply header
-                                let reply_header = MessageHeader {
-                                    msg_id: uuid::Uuid::new_v4().to_string(),
-                                    session: raw_msg.header.session.clone(),
-                                    username: "kernel".to_string(),
-                                    date: chrono::Utc::now().to_rfc3339(),
-                                    msg_type: "kernel_info_reply".to_string(),
-                                    //version: "5.3".to_string(),
-                                    version: raw_msg.header.version.clone(), // Match request version?
-                                };
+                                let reply_header = MessageHeader::new(
+                                    raw_msg.header.session.clone(),
+                                    "kernel_info_reply".to_string(),
+                                );
 
                                 // IOPub: status busy
-                                {
-                                    let status_header = MessageHeader {
-                                        msg_id: uuid::Uuid::new_v4().to_string(),
-                                        session: raw_msg.header.session.clone(),
-                                        username: "kernel".to_string(),
-                                        date: chrono::Utc::now().to_rfc3339(),
-                                        msg_type: "status".to_string(),
-                                        version: reply_header.version.clone(),
-                                    };
-                                    let parent_header = Some(raw_msg.header.clone());
-                                    let metadata =
-                                        serde_json::Value::Object(serde_json::Map::new());
-                                    let content = serde_json::json!({"execution_state":"busy"});
-
-                                    let h = serde_json::to_vec(&status_header).unwrap();
-                                    let p = serde_json::to_vec(&parent_header).unwrap();
-                                    let m = serde_json::to_vec(&metadata).unwrap();
-                                    let c = serde_json::to_vec(&content).unwrap();
-                                    let sig =
-                                        sign_message(&config.key, &h, &p, &m, &c).into_bytes();
-
-                                    let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
-                                    iopub_frames.push(b"<IDS|MSG>".to_vec());
-                                    iopub_frames.push(sig);
-                                    iopub_frames.push(h);
-                                    iopub_frames.push(p);
-                                    iopub_frames.push(m);
-                                    iopub_frames.push(c);
-
-                                    let bytes_frames: Vec<bytes::Bytes> = iopub_frames
-                                        .into_iter()
-                                        .map(|frame| frame.into())
-                                        .collect();
-                                    if let Ok(zmq_msg) = zeromq::ZmqMessage::try_from(bytes_frames)
-                                    {
-                                        let _ = iopub_socket.send(zmq_msg).await;
-                                    }
+                                if let Ok(zmq_msg) = build_iopub_status_msg(
+                                    &raw_msg,
+                                    &config.key,
+                                    &config.signature_scheme,
+                                    "busy".to_string(),
+                                ) {
+                                    let _ = iopub_socket.send(zmq_msg).await;
                                 }
 
                                 println!("Sending reply with version: {}", &reply_header.version);
@@ -204,6 +139,7 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                 // Compute HMAC
                                 let sig = sign_message(
                                     &config.key,
+                                    &config.signature_scheme,
                                     &header_bytes,
                                     &parent_header_bytes,
                                     &metadata_bytes,
@@ -251,92 +187,35 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                 }
 
                                 // IOPub: status idle
-                                {
-                                    let status_header = MessageHeader {
-                                        msg_id: uuid::Uuid::new_v4().to_string(),
-                                        session: raw_msg.header.session.clone(),
-                                        username: "kernel".to_string(),
-                                        date: chrono::Utc::now().to_rfc3339(),
-                                        msg_type: "status".to_string(),
-                                        version: reply_msg.header.version.clone(),
-                                    };
-                                    let parent_header = Some(raw_msg.header.clone());
-                                    let metadata =
-                                        serde_json::Value::Object(serde_json::Map::new());
-                                    let content = serde_json::json!({"execution_state":"idle"});
-
-                                    let h = serde_json::to_vec(&status_header).unwrap();
-                                    let p = serde_json::to_vec(&parent_header).unwrap();
-                                    let m = serde_json::to_vec(&metadata).unwrap();
-                                    let c = serde_json::to_vec(&content).unwrap();
-                                    let sig =
-                                        sign_message(&config.key, &h, &p, &m, &c).into_bytes();
-
-                                    let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
-                                    iopub_frames.push(b"<IDS|MSG>".to_vec());
-                                    iopub_frames.push(sig);
-                                    iopub_frames.push(h);
-                                    iopub_frames.push(p);
-                                    iopub_frames.push(m);
-                                    iopub_frames.push(c);
-
-                                    let bytes_frames: Vec<bytes::Bytes> = iopub_frames
-                                        .into_iter()
-                                        .map(|frame| frame.into())
-                                        .collect();
-                                    if let Ok(zmq_msg) = zeromq::ZmqMessage::try_from(bytes_frames)
-                                    {
-                                        let _ = iopub_socket.send(zmq_msg).await;
-                                    }
+                                if let Ok(zmq_msg) = build_iopub_status_msg(
+                                    &raw_msg,
+                                    &config.key,
+                                    &config.signature_scheme,
+                                    "idle".to_string(),
+                                ) {
+                                    let _ = iopub_socket.send(zmq_msg).await;
                                 }
                             }
                             "execute_request" => {
                                 println!("Handling execute_request");
                                 // Parse the execute request
                                 if let Ok(exec_msg) =
-                                    JupyterMessage::<ExecuteRequest>::from_multipart(&frames)
+                                    JupyterMessage::<ExecuteRequest>::from_multipart(
+                                        &frames,
+                                        &config.key,
+                                        &config.signature_scheme,
+                                    )
                                 {
                                     println!("Executing code: {}", exec_msg.content.code);
 
                                     // IOPub: status busy
-                                    {
-                                        let status_header = MessageHeader {
-                                            msg_id: uuid::Uuid::new_v4().to_string(),
-                                            session: raw_msg.header.session.clone(),
-                                            username: "kernel".to_string(),
-                                            date: chrono::Utc::now().to_rfc3339(),
-                                            msg_type: "status".to_string(),
-                                            version: raw_msg.header.version.clone(),
-                                        };
-                                        let parent_header = Some(raw_msg.header.clone());
-                                        let metadata =
-                                            serde_json::Value::Object(serde_json::Map::new());
-                                        let content = serde_json::json!({"execution_state":"busy"});
-
-                                        let h = serde_json::to_vec(&status_header).unwrap();
-                                        let p = serde_json::to_vec(&parent_header).unwrap();
-                                        let m = serde_json::to_vec(&metadata).unwrap();
-                                        let c = serde_json::to_vec(&content).unwrap();
-                                        let sig =
-                                            sign_message(&config.key, &h, &p, &m, &c).into_bytes();
-
-                                        let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
-                                        iopub_frames.push(b"<IDS|MSG>".to_vec());
-                                        iopub_frames.push(sig);
-                                        iopub_frames.push(h);
-                                        iopub_frames.push(p);
-                                        iopub_frames.push(m);
-                                        iopub_frames.push(c);
-
-                                        let bytes_frames: Vec<bytes::Bytes> = iopub_frames
-                                            .into_iter()
-                                            .map(|frame| frame.into())
-                                            .collect();
-                                        if let Ok(zmq_msg) =
-                                            zeromq::ZmqMessage::try_from(bytes_frames)
-                                        {
-                                            let _ = iopub_socket.send(zmq_msg).await;
-                                        }
+                                    if let Ok(zmq_msg) = build_iopub_status_msg(
+                                        &raw_msg,
+                                        &config.key,
+                                        &config.signature_scheme,
+                                        "busy".to_string(),
+                                    ) {
+                                        let _ = iopub_socket.send(zmq_msg).await;
                                     }
 
                                     // For now, just echo the code back as output
@@ -350,14 +229,11 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     };
 
                                     // Build reply message (same pattern as kernel_info_reply)
-                                    let reply_header = MessageHeader {
-                                        msg_id: uuid::Uuid::new_v4().to_string(),
-                                        session: raw_msg.header.session.clone(),
-                                        username: "kernel".to_string(),
-                                        date: chrono::Utc::now().to_rfc3339(),
-                                        msg_type: "execute_reply".to_string(),
-                                        version: "5.3".to_string(),
-                                    };
+
+                                    let reply_header = MessageHeader::new(
+                                        raw_msg.header.session.clone(),
+                                        "execute_reply".to_string(),
+                                    );
 
                                     let reply_msg = JupyterMessage {
                                         header: reply_header,
@@ -379,6 +255,7 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     // Compute HMAC
                                     let sig = sign_message(
                                         &config.key,
+                                        &config.signature_scheme,
                                         &header_bytes,
                                         &parent_header_bytes,
                                         &metadata_bytes,
@@ -414,44 +291,13 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     }
 
                                     // IOPub: status idle
-                                    {
-                                        let status_header = MessageHeader {
-                                            msg_id: uuid::Uuid::new_v4().to_string(),
-                                            session: raw_msg.header.session.clone(),
-                                            username: "kernel".to_string(),
-                                            date: chrono::Utc::now().to_rfc3339(),
-                                            msg_type: "status".to_string(),
-                                            version: "5.3".to_string(),
-                                        };
-                                        let parent_header = Some(raw_msg.header.clone());
-                                        let metadata =
-                                            serde_json::Value::Object(serde_json::Map::new());
-                                        let content = serde_json::json!({"execution_state":"idle"});
-
-                                        let h = serde_json::to_vec(&status_header).unwrap();
-                                        let p = serde_json::to_vec(&parent_header).unwrap();
-                                        let m = serde_json::to_vec(&metadata).unwrap();
-                                        let c = serde_json::to_vec(&content).unwrap();
-                                        let sig =
-                                            sign_message(&config.key, &h, &p, &m, &c).into_bytes();
-
-                                        let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
-                                        iopub_frames.push(b"<IDS|MSG>".to_vec());
-                                        iopub_frames.push(sig);
-                                        iopub_frames.push(h);
-                                        iopub_frames.push(p);
-                                        iopub_frames.push(m);
-                                        iopub_frames.push(c);
-
-                                        let bytes_frames: Vec<bytes::Bytes> = iopub_frames
-                                            .into_iter()
-                                            .map(|frame| frame.into())
-                                            .collect();
-                                        if let Ok(zmq_msg) =
-                                            zeromq::ZmqMessage::try_from(bytes_frames)
-                                        {
-                                            let _ = iopub_socket.send(zmq_msg).await;
-                                        }
+                                    if let Ok(zmq_msg) = build_iopub_status_msg(
+                                        &raw_msg,
+                                        &config.key,
+                                        &config.signature_scheme,
+                                        "idle".to_string(),
+                                    ) {
+                                        let _ = iopub_socket.send(zmq_msg).await;
                                     }
                                 }
                             }
@@ -510,6 +356,7 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
 pub fn sign_message(
+    signature_scheme: &str,
     key: &str,
     header: &[u8],
     parent_header: &[u8],
@@ -519,6 +366,10 @@ pub fn sign_message(
     if key.is_empty() {
         return String::new();
     }
+    // TODO: Is this check right?
+    if signature_scheme != "hmac-sha256" {
+        eprintln!("wrong signature schema: {signature_scheme}")
+    }
 
     let mut mac: HmacSha256 = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key error");
     mac.update(header);
@@ -526,4 +377,35 @@ pub fn sign_message(
     mac.update(metadata);
     mac.update(content);
     hex::encode(mac.finalize().into_bytes())
+}
+
+fn build_iopub_status_msg(
+    raw_msg: &JupyterMessage<serde_json::Value>,
+    config_key: &str,
+    config_signature_scheme: &str,
+    status: String,
+) -> anyhow::Result<zeromq::ZmqMessage, zeromq::ZmqEmptyMessageError> {
+    let status_header = MessageHeader::new(raw_msg.header.session.clone(), "status".to_string());
+
+    let parent_header = Some(raw_msg.header.clone());
+    let metadata = serde_json::Value::Object(serde_json::Map::new());
+    let content = serde_json::json!({"execution_state":status});
+
+    let h = serde_json::to_vec(&status_header).unwrap();
+    let p = serde_json::to_vec(&parent_header).unwrap();
+    let m = serde_json::to_vec(&metadata).unwrap();
+    let c = serde_json::to_vec(&content).unwrap();
+    let sig = sign_message(config_key, config_signature_scheme, &h, &p, &m, &c).into_bytes();
+
+    let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
+    iopub_frames.push(b"<IDS|MSG>".to_vec());
+    iopub_frames.push(sig);
+    iopub_frames.push(h);
+    iopub_frames.push(p);
+    iopub_frames.push(m);
+    iopub_frames.push(c);
+
+    let bytes_frames: Vec<bytes::Bytes> =
+        iopub_frames.into_iter().map(|frame| frame.into()).collect();
+    zeromq::ZmqMessage::try_from(bytes_frames)
 }

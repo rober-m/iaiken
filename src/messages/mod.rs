@@ -1,6 +1,8 @@
 use crate::connection::sign_message;
 use serde::{Deserialize, Serialize};
 
+const PROTOCOL_VERSION: &str = "5.3";
+
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#message-header
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MessageHeader {
@@ -9,7 +11,20 @@ pub struct MessageHeader {
     pub username: String, // Usually "kernel"
     pub date: String,     // ISO 8601 timestamp
     pub msg_type: String, // "execute_request", "kernel_info_request", etc.
-    pub version: String,  // Protocol version "5.4"
+    pub version: String,  // Protocol version
+}
+
+impl MessageHeader {
+    pub fn new(session: String, msg_type: String) -> Self {
+        MessageHeader {
+            msg_id: uuid::Uuid::new_v4().to_string(),
+            session,
+            username: "kernel".to_string(),
+            date: chrono::Utc::now().to_rfc3339(),
+            msg_type,
+            version: PROTOCOL_VERSION.to_string(),
+        }
+    }
 }
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#general-message-format
@@ -25,33 +40,47 @@ impl<T> JupyterMessage<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    pub fn from_multipart(frames: &[Vec<u8>]) -> anyhow::Result<Self> {
-        if frames.len() < 7 {
+    pub fn from_multipart(
+        frames: &[Vec<u8>],
+        config_key: &str,
+        config_signature_scheme: &str,
+    ) -> anyhow::Result<Self> {
+        let delim_index = delim_index(frames)?;
+
+        if frames.len() < delim_index + 5 {
             return Err(anyhow::anyhow!(
                 "Invalid message format: Only {} frames!",
                 frames.len()
             ));
         }
 
+        let header_bytes = &frames[delim_index + 2];
+        let parent_bytes = &frames[delim_index + 3];
+        let metadata_bytes = &frames[delim_index + 4];
+        let content_bytes = &frames[delim_index + 5];
+
+        verify_incoming_hmac(frames, config_key, config_signature_scheme, delim_index);
+
         // Skip identity and delimiter frames (first 2)
         // Skip HMAC frame (frame 2) for now
-        let header: MessageHeader = serde_json::from_slice(&frames[3])?;
-        let parent_header: Option<MessageHeader> = if frames[4].is_empty() || frames[4] == b"{}" {
+        let header: MessageHeader = serde_json::from_slice(header_bytes)?;
+        let parent_header: Option<MessageHeader> = if frames[4].is_empty() || parent_bytes == b"{}"
+        {
             None
         } else {
-            Some(serde_json::from_slice(&frames[4])?)
+            Some(serde_json::from_slice(parent_bytes)?)
         };
 
-        let metadata: serde_json::Value = if frames[5].is_empty() || frames[5] == b"{}" {
+        let metadata: serde_json::Value = if metadata_bytes.is_empty() || metadata_bytes == b"{}" {
             serde_json::Value::Object(serde_json::Map::new())
         } else {
-            serde_json::from_slice(&frames[5])?
+            serde_json::from_slice(metadata_bytes)?
         };
 
-        let content: T = if frames[6].is_empty() || frames[6] == b"{}" {
+        let content: T = if content_bytes.is_empty() || content_bytes == b"{}" {
             serde_json::from_str("{}")?
         } else {
-            serde_json::from_slice(&frames[6])?
+            serde_json::from_slice(content_bytes)?
         };
 
         Ok(JupyterMessage {
@@ -71,6 +100,7 @@ where
         &self,
         identity: Option<&[u8]>,
         signing_key: &str,
+        config_signature_scheme: &str,
     ) -> anyhow::Result<Vec<Vec<u8>>> {
         // Serialize the message parts first
         let header_bytes = serde_json::to_vec(&self.header)?;
@@ -88,6 +118,7 @@ where
             // Frame 2: HMAC signature
             sign_message(
                 signing_key,
+                config_signature_scheme,
                 &header_bytes,
                 &parent_header_bytes,
                 &metadata_bytes,
@@ -101,7 +132,7 @@ where
             // Frame 5: Metadata
             metadata_bytes,
             // Frame 6: Content
-            content_bytes
+            content_bytes,
         ])
     }
 }
@@ -118,12 +149,12 @@ pub struct ExecuteRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-  pub struct ExecuteReply {
-      pub status: String,          // "ok" or "error"
-      pub execution_count: u32,    // Incremental counter
-      #[serde(skip_serializing_if = "Option::is_none")]
-      pub user_expressions: Option<serde_json::Value>,
-  }
+pub struct ExecuteReply {
+    pub status: String,       // "ok" or "error"
+    pub execution_count: u32, // Incremental counter
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_expressions: Option<serde_json::Value>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectionConfig {
@@ -222,4 +253,43 @@ impl KernelSpec {
     }
 }
 
+// Find the <IDS|MSG> delimiter to support variable identity envelope
+pub fn delim_index(frames: &[Vec<u8>]) -> anyhow::Result<usize> {
+    match frames.iter().position(|f| f.as_slice() == b"<IDS|MSG>") {
+        Some(index) => Ok(index),
+        None => Err(anyhow::anyhow!(
+            "Malformed message: missing <IDS|MSG> delimiter with {} frames",
+            frames.len()
+        )),
+    }
+}
 
+pub fn verify_incoming_hmac(
+    frames: &[Vec<u8>],
+    config_key: &str,
+    config_signature_scheme: &str,
+    delim_index: usize,
+) {
+    if config_key.is_empty() {
+        println!("Empty config key, skipping HMAC check")
+    } else {
+        let incoming_sig = std::str::from_utf8(&frames[delim_index + 1]).unwrap_or("invalid");
+        // Recompute signature over received header/parent/metadata/content
+        let header_bytes = &frames[delim_index + 2];
+        let parent_bytes = &frames[delim_index + 3];
+        let metadata_bytes = &frames[delim_index + 4];
+        let content_bytes = &frames[delim_index + 5];
+        let expected_sig = sign_message(
+            config_signature_scheme,
+            config_key,
+            header_bytes,
+            parent_bytes,
+            metadata_bytes,
+            content_bytes,
+        );
+        println!("Incoming HMAC was: {}", incoming_sig);
+        if incoming_sig != expected_sig {
+            eprintln!("Warning: incoming HMAC mismatch");
+        }
+    }
+}
