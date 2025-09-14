@@ -51,14 +51,46 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                 Ok(message) => {
                     // Try to parse as a generic message first to get the header
                     let frames: Vec<Vec<u8>> = message.iter().map(|frame| frame.to_vec()).collect();
+
+                    // Find the <IDS|MSG> delimiter to support variable identity envelope
+                    let delim_index = match frames.iter().position(|f| f.as_slice() == b"<IDS|MSG>")
+                    {
+                        Some(i) => i,
+                        None => {
+                            eprintln!(
+                                "Malformed message: missing <IDS|MSG> delimiter with {} frames",
+                                frames.len()
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Verify incoming HMAC if present
+                    if frames.len() > delim_index + 5 {
+                        let incoming_sig =
+                            std::str::from_utf8(&frames[delim_index + 1]).unwrap_or("invalid");
+                        // Recompute signature over received header/parent/metadata/content
+                        let header_bytes = &frames[delim_index + 2];
+                        let parent_bytes = &frames[delim_index + 3];
+                        let metadata_bytes = &frames[delim_index + 4];
+                        let content_bytes = &frames[delim_index + 5];
+                        let expected_sig = sign_message(
+                            &config.key,
+                            header_bytes,
+                            parent_bytes,
+                            metadata_bytes,
+                            content_bytes,
+                        );
+                        println!("Incoming HMAC was: {}", incoming_sig);
+                        if !config.key.is_empty() && incoming_sig != expected_sig {
+                            eprintln!("Warning: incoming HMAC mismatch");
+                        }
+                    }
+
                     if let Ok(raw_msg) =
                         JupyterMessage::<serde_json::Value>::from_multipart(&frames)
                     {
                         println!("Received message type: {}", raw_msg.header.msg_type);
-                        println!(
-                            "Incoming HMAC was: {}",
-                            std::str::from_utf8(&frames[2]).unwrap_or("invalid")
-                        );
 
                         // Route based on message type
                         match raw_msg.header.msg_type.as_str() {
@@ -106,6 +138,46 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     version: raw_msg.header.version.clone(), // Match request version?
                                 };
 
+                                // IOPub: status busy
+                                {
+                                    let status_header = MessageHeader {
+                                        msg_id: uuid::Uuid::new_v4().to_string(),
+                                        session: raw_msg.header.session.clone(),
+                                        username: "kernel".to_string(),
+                                        date: chrono::Utc::now().to_rfc3339(),
+                                        msg_type: "status".to_string(),
+                                        version: reply_header.version.clone(),
+                                    };
+                                    let parent_header = Some(raw_msg.header.clone());
+                                    let metadata =
+                                        serde_json::Value::Object(serde_json::Map::new());
+                                    let content = serde_json::json!({"execution_state":"busy"});
+
+                                    let h = serde_json::to_vec(&status_header).unwrap();
+                                    let p = serde_json::to_vec(&parent_header).unwrap();
+                                    let m = serde_json::to_vec(&metadata).unwrap();
+                                    let c = serde_json::to_vec(&content).unwrap();
+                                    let sig =
+                                        sign_message(&config.key, &h, &p, &m, &c).into_bytes();
+
+                                    let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
+                                    iopub_frames.push(b"<IDS|MSG>".to_vec());
+                                    iopub_frames.push(sig);
+                                    iopub_frames.push(h);
+                                    iopub_frames.push(p);
+                                    iopub_frames.push(m);
+                                    iopub_frames.push(c);
+
+                                    let bytes_frames: Vec<bytes::Bytes> = iopub_frames
+                                        .into_iter()
+                                        .map(|frame| frame.into())
+                                        .collect();
+                                    if let Ok(zmq_msg) = zeromq::ZmqMessage::try_from(bytes_frames)
+                                    {
+                                        let _ = iopub_socket.send(zmq_msg).await;
+                                    }
+                                }
+
                                 println!("Sending reply with version: {}", &reply_header.version);
                                 println!(
                                     "Reply content: {}",
@@ -121,43 +193,101 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     content: reply,
                                 };
 
-                                // Convert to ZMQ frames
-                                if let Ok(frames) =
-                                    reply_msg.to_multipart(Some(&frames[0]), &config.key)
-                                {
-                                    // Debug the actual frames being sent
-                                    println!("Debug: Sending {} frames", frames.len());
-                                    for (i, frame) in frames.iter().enumerate() {
-                                        if let Ok(text) = std::str::from_utf8(frame) {
-                                            println!("Outgoing Frame {}: {}", i, text);
-                                        } else {
-                                            println!(
-                                                "Outgoing Frame {}: {} bytes (binary)",
-                                                i,
-                                                frame.len()
-                                            );
-                                        }
-                                    }
+                                // Serialize message parts
+                                let header_bytes = serde_json::to_vec(&reply_msg.header).unwrap();
+                                let parent_header_bytes =
+                                    serde_json::to_vec(&reply_msg.parent_header).unwrap();
+                                let metadata_bytes =
+                                    serde_json::to_vec(&reply_msg.metadata).unwrap();
+                                let content_bytes = serde_json::to_vec(&reply_msg.content).unwrap();
 
-                                    // Convert Vec<Vec<u8>> to Vec<Bytes>
-                                    let bytes_frames: Vec<bytes::Bytes> =
-                                        frames.into_iter().map(|frame| frame.into()).collect();
-                                    // Convert Vec<Bytes> to ZmqMessage
-                                    match zeromq::ZmqMessage::try_from(bytes_frames) {
-                                        Ok(zmq_msg) => {
-                                            // Send reply
-                                            if let Err(e) = shell_socket.send(zmq_msg).await {
-                                                eprintln!("Failed to send kernel_info_reply: {e}",);
-                                            } else {
-                                                println!("Sent kernel_info_reply successfully!");
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to create ZmqMessage: {e}");
+                                // Compute HMAC
+                                let sig = sign_message(
+                                    &config.key,
+                                    &header_bytes,
+                                    &parent_header_bytes,
+                                    &metadata_bytes,
+                                    &content_bytes,
+                                )
+                                .into_bytes();
+
+                                // Build outgoing frames: reuse full identity envelope up to and including delimiter
+                                let mut out_frames: Vec<Vec<u8>> = Vec::new();
+                                out_frames.extend_from_slice(&frames[..=delim_index]);
+                                out_frames.push(sig);
+                                out_frames.push(header_bytes);
+                                out_frames.push(parent_header_bytes);
+                                out_frames.push(metadata_bytes);
+                                out_frames.push(content_bytes);
+
+                                // Debug the actual frames being sent
+                                println!("Debug: Sending {} frames", out_frames.len());
+                                for (i, frame) in out_frames.iter().enumerate() {
+                                    if let Ok(text) = std::str::from_utf8(frame) {
+                                        println!("Outgoing Frame {}: {}", i, text);
+                                    } else {
+                                        println!(
+                                            "Outgoing Frame {}: {} bytes (binary)",
+                                            i,
+                                            frame.len()
+                                        );
+                                    }
+                                }
+
+                                // Convert and send
+                                let bytes_frames: Vec<bytes::Bytes> =
+                                    out_frames.into_iter().map(|frame| frame.into()).collect();
+                                match zeromq::ZmqMessage::try_from(bytes_frames) {
+                                    Ok(zmq_msg) => {
+                                        if let Err(e) = shell_socket.send(zmq_msg).await {
+                                            eprintln!("Failed to send kernel_info_reply: {e}",);
+                                        } else {
+                                            println!("Sent kernel_info_reply successfully!");
                                         }
                                     }
-                                } else {
-                                    eprintln!("Failed to serialize kernel_info_reply");
+                                    Err(e) => {
+                                        eprintln!("Failed to create ZmqMessage: {e}");
+                                    }
+                                }
+
+                                // IOPub: status idle
+                                {
+                                    let status_header = MessageHeader {
+                                        msg_id: uuid::Uuid::new_v4().to_string(),
+                                        session: raw_msg.header.session.clone(),
+                                        username: "kernel".to_string(),
+                                        date: chrono::Utc::now().to_rfc3339(),
+                                        msg_type: "status".to_string(),
+                                        version: reply_msg.header.version.clone(),
+                                    };
+                                    let parent_header = Some(raw_msg.header.clone());
+                                    let metadata =
+                                        serde_json::Value::Object(serde_json::Map::new());
+                                    let content = serde_json::json!({"execution_state":"idle"});
+
+                                    let h = serde_json::to_vec(&status_header).unwrap();
+                                    let p = serde_json::to_vec(&parent_header).unwrap();
+                                    let m = serde_json::to_vec(&metadata).unwrap();
+                                    let c = serde_json::to_vec(&content).unwrap();
+                                    let sig =
+                                        sign_message(&config.key, &h, &p, &m, &c).into_bytes();
+
+                                    let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
+                                    iopub_frames.push(b"<IDS|MSG>".to_vec());
+                                    iopub_frames.push(sig);
+                                    iopub_frames.push(h);
+                                    iopub_frames.push(p);
+                                    iopub_frames.push(m);
+                                    iopub_frames.push(c);
+
+                                    let bytes_frames: Vec<bytes::Bytes> = iopub_frames
+                                        .into_iter()
+                                        .map(|frame| frame.into())
+                                        .collect();
+                                    if let Ok(zmq_msg) = zeromq::ZmqMessage::try_from(bytes_frames)
+                                    {
+                                        let _ = iopub_socket.send(zmq_msg).await;
+                                    }
                                 }
                             }
                             "execute_request" => {
@@ -167,6 +297,47 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                     JupyterMessage::<ExecuteRequest>::from_multipart(&frames)
                                 {
                                     println!("Executing code: {}", exec_msg.content.code);
+
+                                    // IOPub: status busy
+                                    {
+                                        let status_header = MessageHeader {
+                                            msg_id: uuid::Uuid::new_v4().to_string(),
+                                            session: raw_msg.header.session.clone(),
+                                            username: "kernel".to_string(),
+                                            date: chrono::Utc::now().to_rfc3339(),
+                                            msg_type: "status".to_string(),
+                                            version: raw_msg.header.version.clone(),
+                                        };
+                                        let parent_header = Some(raw_msg.header.clone());
+                                        let metadata =
+                                            serde_json::Value::Object(serde_json::Map::new());
+                                        let content = serde_json::json!({"execution_state":"busy"});
+
+                                        let h = serde_json::to_vec(&status_header).unwrap();
+                                        let p = serde_json::to_vec(&parent_header).unwrap();
+                                        let m = serde_json::to_vec(&metadata).unwrap();
+                                        let c = serde_json::to_vec(&content).unwrap();
+                                        let sig =
+                                            sign_message(&config.key, &h, &p, &m, &c).into_bytes();
+
+                                        let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
+                                        iopub_frames.push(b"<IDS|MSG>".to_vec());
+                                        iopub_frames.push(sig);
+                                        iopub_frames.push(h);
+                                        iopub_frames.push(p);
+                                        iopub_frames.push(m);
+                                        iopub_frames.push(c);
+
+                                        let bytes_frames: Vec<bytes::Bytes> = iopub_frames
+                                            .into_iter()
+                                            .map(|frame| frame.into())
+                                            .collect();
+                                        if let Ok(zmq_msg) =
+                                            zeromq::ZmqMessage::try_from(bytes_frames)
+                                        {
+                                            let _ = iopub_socket.send(zmq_msg).await;
+                                        }
+                                    }
 
                                     // For now, just echo the code back as output
                                     // TODO: Actually compile/execute Aiken code
@@ -195,26 +366,91 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                         content: reply,
                                     };
 
-                                    // Send execute_reply through shell socket
-                                    if let Ok(reply_frames) =
-                                        reply_msg.to_multipart(Some(&frames[0]), &config.key)
+                                    // Serialize parts
+                                    let header_bytes =
+                                        serde_json::to_vec(&reply_msg.header).unwrap();
+                                    let parent_header_bytes =
+                                        serde_json::to_vec(&reply_msg.parent_header).unwrap();
+                                    let metadata_bytes =
+                                        serde_json::to_vec(&reply_msg.metadata).unwrap();
+                                    let content_bytes =
+                                        serde_json::to_vec(&reply_msg.content).unwrap();
+
+                                    // Compute HMAC
+                                    let sig = sign_message(
+                                        &config.key,
+                                        &header_bytes,
+                                        &parent_header_bytes,
+                                        &metadata_bytes,
+                                        &content_bytes,
+                                    )
+                                    .into_bytes();
+
+                                    // Build outgoing frames
+                                    let mut out_frames: Vec<Vec<u8>> = Vec::new();
+                                    out_frames.extend_from_slice(&frames[..=delim_index]);
+                                    out_frames.push(sig);
+                                    out_frames.push(header_bytes);
+                                    out_frames.push(parent_header_bytes);
+                                    out_frames.push(metadata_bytes);
+                                    out_frames.push(content_bytes);
+
+                                    let bytes_frames: Vec<bytes::Bytes> =
+                                        out_frames.into_iter().map(|frame| frame.into()).collect();
+
+                                    match zeromq::ZmqMessage::try_from(bytes_frames) {
+                                        Ok(zmq_msg) => {
+                                            if let Err(e) = shell_socket.send(zmq_msg).await {
+                                                eprintln!("Failed to send execute_reply: {e}");
+                                            } else {
+                                                println!("Sent execute_reply successfully!");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Failed to create execute_reply ZmqMessage: {e}"
+                                            );
+                                        }
+                                    }
+
+                                    // IOPub: status idle
                                     {
-                                        let bytes_frames: Vec<bytes::Bytes> = reply_frames
+                                        let status_header = MessageHeader {
+                                            msg_id: uuid::Uuid::new_v4().to_string(),
+                                            session: raw_msg.header.session.clone(),
+                                            username: "kernel".to_string(),
+                                            date: chrono::Utc::now().to_rfc3339(),
+                                            msg_type: "status".to_string(),
+                                            version: "5.3".to_string(),
+                                        };
+                                        let parent_header = Some(raw_msg.header.clone());
+                                        let metadata =
+                                            serde_json::Value::Object(serde_json::Map::new());
+                                        let content = serde_json::json!({"execution_state":"idle"});
+
+                                        let h = serde_json::to_vec(&status_header).unwrap();
+                                        let p = serde_json::to_vec(&parent_header).unwrap();
+                                        let m = serde_json::to_vec(&metadata).unwrap();
+                                        let c = serde_json::to_vec(&content).unwrap();
+                                        let sig =
+                                            sign_message(&config.key, &h, &p, &m, &c).into_bytes();
+
+                                        let mut iopub_frames: Vec<Vec<u8>> = Vec::new();
+                                        iopub_frames.push(b"<IDS|MSG>".to_vec());
+                                        iopub_frames.push(sig);
+                                        iopub_frames.push(h);
+                                        iopub_frames.push(p);
+                                        iopub_frames.push(m);
+                                        iopub_frames.push(c);
+
+                                        let bytes_frames: Vec<bytes::Bytes> = iopub_frames
                                             .into_iter()
                                             .map(|frame| frame.into())
                                             .collect();
-
-                                        match zeromq::ZmqMessage::try_from(bytes_frames) {
-                                            Ok(zmq_msg) => {
-                                                if let Err(e) = shell_socket.send(zmq_msg).await {
-                                                    eprintln!("Failed to send execute_reply: {e}");
-                                                } else {
-                                                    println!("Sent execute_reply successfully!");
-                                                }
-                                            }
-                                            Err(e) => {
-                                                eprintln!("Failed to create execute_reply ZmqMessage: {e}");
-                                            }
+                                        if let Ok(zmq_msg) =
+                                            zeromq::ZmqMessage::try_from(bytes_frames)
+                                        {
+                                            let _ = iopub_socket.send(zmq_msg).await;
                                         }
                                     }
                                 }
@@ -280,51 +516,14 @@ pub fn sign_message(
     metadata: &[u8],
     content: &[u8],
 ) -> String {
-    // println!("HMAC key being used: '{}'", key);
-    // println!("HMAC key length: {}", key.len());
-    //
-    // // Debug: Print what we're signing
-    // println!("Header bytes length: {}", header.len());
-    // println!("Parent header bytes length: {}", parent_header.len());
-    // println!("Metadata bytes length: {}", metadata.len());
-    // println!("Content bytes length: {}", content.len());
-    //
-    // // Show actual JSON being signed
-    // println!(
-    //     "Header JSON: {}",
-    //     std::str::from_utf8(header).unwrap_or("invalid")
-    // );
-    // println!(
-    //     "Parent header JSON: {}",
-    //     std::str::from_utf8(parent_header).unwrap_or("invalid")
-    // );
-    // println!(
-    //     "Metadata JSON: {}",
-    //     std::str::from_utf8(metadata).unwrap_or("invalid")
-    // );
-    //
-    // // Decode the hex key to bytes
-    // let key_bytes = match hex::decode(key.replace("-", "")) {
-    //     Ok(bytes) => bytes,
-    //     Err(_) => {
-    //         // If hex decode fails, use the key as-is (fallback)
-    //         println!("Warning: Could not decode key as hex, using as string");
-    //         key.as_bytes().to_vec()
-    //     }
-    // };
-    //
-    // println!("Decoded key length: {}", key_bytes.len());
-    //
-    // let mut mac: HmacSha256 = HmacSha256::new_from_slice(&key_bytes).expect("HMAC key error");
-    // mac.update(header);
-    // mac.update(parent_header);
-    // mac.update(metadata);
-    // mac.update(content);
-    // let result = hex::encode(mac.finalize().into_bytes());
-    //
-    // println!("Generated HMAC: {}", result);
-    //return result
+    if key.is_empty() {
+        return String::new();
+    }
 
-    // WARN: Debugging HMAC signature, delete this afterwards
-    String::new()
+    let mut mac: HmacSha256 = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key error");
+    mac.update(header);
+    mac.update(parent_header);
+    mac.update(metadata);
+    mac.update(content);
+    hex::encode(mac.finalize().into_bytes())
 }
