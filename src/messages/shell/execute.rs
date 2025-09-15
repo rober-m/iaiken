@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use zeromq::{PubSocket, RouterSocket};
-
-use crate::{connection::send_bytes, messages::MessageHeader};
-
-use super::{ConnectionConfig, JupyterMessage};
+use crate::messages::{wire::send_bytes, ConnectionConfig, JupyterMessage, MessageHeader};
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#execute
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -31,6 +28,7 @@ pub async fn handle_execute_request(
     raw_msg: JupyterMessage<serde_json::Value>,
     frames: Vec<Vec<u8>>,
     delim_index: usize,
+    execution_count: u32
 ) {
     println!("Handling execute_request");
     // Parse the execute request
@@ -43,9 +41,9 @@ pub async fn handle_execute_request(
 
         // IOPub: status busy
         if let Ok(bytes_frames) =
-            raw_msg.to_iopub_multipart(&config.key, &config.signature_scheme, "busy".to_string())
+            raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy")
         {
-            let _ = send_bytes(iopub_socket, bytes_frames).await;
+            send_bytes(iopub_socket, bytes_frames).await.unwrap();
         }
 
         // For now, just echo the code back as output
@@ -54,7 +52,7 @@ pub async fn handle_execute_request(
         // Create execute reply
         let reply = ExecuteReply {
             status: "ok".to_string(),
-            execution_count: 1, // TODO: Track this properly
+            execution_count,
             user_expressions: None,
         };
 
@@ -79,9 +77,9 @@ pub async fn handle_execute_request(
 
         // IOPub: status idle
         if let Ok(bytes_frames) =
-            raw_msg.to_iopub_multipart(&config.key, &config.signature_scheme, "idle".to_string())
+            raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle")
         {
-            let _ = send_bytes(iopub_socket, bytes_frames).await;
+            send_bytes(iopub_socket, bytes_frames).await.unwrap();
         }
     }
 }

@@ -1,5 +1,6 @@
 mod connection;
 mod messages;
+
 mod install;
 
 use clap::Parser;

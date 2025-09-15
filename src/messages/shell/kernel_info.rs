@@ -1,10 +1,9 @@
-use crate::connection::send_bytes;
-use crate::messages::{JupyterMessage, MessageHeader};
+use crate::messages::{wire::send_bytes, ConnectionConfig, JupyterMessage, MessageHeader};
+
 
 use serde::{Deserialize, Serialize};
 use zeromq::{PubSocket, RouterSocket};
 
-use super::ConnectionConfig;
 
 pub const PROTOCOL_VERSION: &str = "5.3";
 const KI_STATUS: &str = "ok"; // TODO: Handle error status
@@ -103,9 +102,9 @@ pub async fn handle_kernel_info_request(
 
     // IOPub: status busy
     if let Ok(bytes_frames) =
-        raw_msg.to_iopub_multipart(&config.key, &config.signature_scheme, "busy".to_string())
+        raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy")
     {
-        let _ = send_bytes(iopub_socket, bytes_frames).await;
+        send_bytes(iopub_socket, bytes_frames).await.unwrap();
     }
 
     println!("Sending reply with version: {}", &reply_header.version);
@@ -125,14 +124,12 @@ pub async fn handle_kernel_info_request(
     if let Ok(bytes_frames) =
         reply_msg.to_envelope_multipart(frames, delim_index, &config.key, &config.signature_scheme)
     {
-        crate::connection::send_bytes(shell_socket, bytes_frames)
-            .await
-            .unwrap();
+        send_bytes(shell_socket, bytes_frames).await.unwrap();
     }
 
     // IOPub: status idle
     if let Ok(bytes_frames) =
-        raw_msg.to_iopub_multipart(&config.key, &config.signature_scheme, "idle".to_string())
+        raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle")
     {
         let _ = send_bytes(iopub_socket, bytes_frames).await;
     }

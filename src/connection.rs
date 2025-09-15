@@ -1,5 +1,4 @@
-use crate::messages::{
-    delim_index, ConnectionConfig, JupyterMessage };
+use crate::messages::{ConnectionConfig, JupyterMessage, wire::delim_index};
 use std::fs;
 use zeromq::{Socket, SocketRecv, SocketSend};
 
@@ -41,6 +40,8 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
 
     println!("All sockets bound successfully!");
 
+    let exec_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
     // Spawn shell handler
     let shell_handle = tokio::spawn(async move {
         loop {
@@ -66,7 +67,7 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                         // Route based on message type
                         match raw_msg.header.msg_type.as_str() {
                             "kernel_info_request" => {
-                                crate::messages::kernel_info::handle_kernel_info_request(
+                                crate::messages::shell::kernel_info::handle_kernel_info_request(
                                     &config,
                                     &mut shell_socket,
                                     &mut iopub_socket,
@@ -77,13 +78,19 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
                                 .await;
                             }
                             "execute_request" => {
-                                crate::messages::execute::handle_execute_request(
+                                // Add +1 to the execution counter
+                                let n = exec_count
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                    + 1;
+
+                                crate::messages::shell::execute::handle_execute_request(
                                     &config,
                                     &mut shell_socket,
                                     &mut iopub_socket,
                                     raw_msg,
                                     frames,
                                     delim_index,
+                                    n,
                                 )
                                 .await;
                             }
@@ -130,19 +137,4 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-pub async fn send_bytes<U: zeromq::Socket + zeromq::SocketSend>(
-    socket: &mut U,
-    bytes_frames: Vec<bytes::Bytes>,
-) -> anyhow::Result<()> {
-    match zeromq::ZmqMessage::try_from(bytes_frames) {
-        Ok(zmq_msg) => {
-            if let Err(e) = socket.send(zmq_msg).await {
-                eprintln!("Failed to send reply: {e}");
-            }
-            Ok(())
-        }
-        Err(e) => Err(anyhow::anyhow!("Failed to create reply ZmqMessage: {e}")),
-    }
 }
