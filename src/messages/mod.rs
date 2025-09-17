@@ -2,11 +2,14 @@ use serde::{Deserialize, Serialize};
 
 pub mod crypto;
 pub mod iopub;
+pub mod wire;
 pub mod shell {
     pub mod execute;
     pub mod kernel_info;
 }
-pub mod wire;
+pub mod control {
+    pub mod shutdown;
+}
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#message-header
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -40,7 +43,6 @@ pub struct JupyterMessage<T> {
     pub metadata: serde_json::Value,          // Metadata for this message
     pub content: T,                           // Content specific to the message type
 }
-
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ConnectionConfig {
@@ -76,4 +78,3 @@ impl ConnectionConfig {
         format!("{}://{}:{}", self.transport, self.ip, self.iopub_port)
     }
 }
-

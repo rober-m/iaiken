@@ -1,6 +1,11 @@
+use crate::messages::{ConnectionConfig, JupyterMessage, MessageHeader, wire::send_bytes};
 use serde::{Deserialize, Serialize};
 use zeromq::{PubSocket, RouterSocket};
-use crate::messages::{wire::send_bytes, ConnectionConfig, JupyterMessage, MessageHeader};
+
+use tokio::sync::mpsc::UnboundedSender;
+
+// TODO: I'm repeating this type cause I don't know how to import it from connection::iopub. :/
+pub type IopubTx = UnboundedSender<Vec<bytes::Bytes>>;
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#execute
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,11 +29,11 @@ pub struct ExecuteReply {
 pub async fn handle_execute_request(
     config: &ConnectionConfig,
     shell_socket: &mut RouterSocket,
-    iopub_socket: &mut PubSocket,
+    iopub_tx: &IopubTx,
     raw_msg: JupyterMessage<serde_json::Value>,
     frames: Vec<Vec<u8>>,
     delim_index: usize,
-    execution_count: u32
+    execution_count: u32,
 ) {
     println!("Handling execute_request");
     // Parse the execute request
@@ -39,11 +44,8 @@ pub async fn handle_execute_request(
     ) {
         println!("Executing code: {}", exec_msg.content.code);
 
-        // IOPub: status busy
-        if let Ok(bytes_frames) =
-            raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy")
-        {
-            send_bytes(iopub_socket, bytes_frames).await.unwrap();
+        if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy") {
+            let _ = iopub_tx.send(frames);
         }
 
         // For now, just echo the code back as output
@@ -75,11 +77,8 @@ pub async fn handle_execute_request(
             send_bytes(shell_socket, bytes_frames).await.unwrap();
         };
 
-        // IOPub: status idle
-        if let Ok(bytes_frames) =
-            raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle")
-        {
-            send_bytes(iopub_socket, bytes_frames).await.unwrap();
+        if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle") {
+            let _ = iopub_tx.send(frames);
         }
     }
 }

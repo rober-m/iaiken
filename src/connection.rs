@@ -1,6 +1,16 @@
-use crate::messages::{ConnectionConfig, JupyterMessage, wire::delim_index};
+use crate::messages::ConnectionConfig;
+use control::control_loop;
+use heartbeat::heartbeat_loop;
+use shell::shell_loop;
 use std::fs;
-use zeromq::{Socket, SocketRecv, SocketSend};
+use tokio::sync::mpsc::unbounded_channel;
+use tokio_util::sync::CancellationToken;
+use zeromq::Socket;
+
+mod control;
+mod heartbeat;
+mod iopub;
+mod shell;
 
 pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
     // 1. Read the connection file
@@ -15,6 +25,9 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
     // 2. Parse JSON into ConnectionConfig
     let config: ConnectionConfig = serde_json::from_str(&config_data)
         .map_err(|e| anyhow::anyhow!("Failed to parse connection file: {}", e))?;
+    // TODO: Why can't I just reference the original config and that's it?
+    let shell_config = config.clone();
+    let control_config = config.clone();
 
     // 3. Build ZMQ addresses
     println!("Kernel starting with config:");
@@ -23,6 +36,8 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
     println!("  IOPub: {}", config.iopub_address());
     println!("  Stdin: {}", config.stdin_address());
     println!("  Heartbeat: {}", config.hb_address());
+
+    let (iopub_tx, mut iopub_rx) = unbounded_channel::<Vec<bytes::Bytes>>();
 
     // 4. Create ZMQ context and sockets
     let mut shell_socket = zeromq::RouterSocket::new();
@@ -40,101 +55,69 @@ pub async fn run_kernel(connection_file: String) -> anyhow::Result<()> {
 
     println!("All sockets bound successfully!");
 
+    // Initiate code execution count
     let exec_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-    // Spawn shell handler
-    let shell_handle = tokio::spawn(async move {
+    //Prepare cancelation tokens
+    let cancel = CancellationToken::new();
+    let cancel_iopub = cancel.clone();
+    let cancel_shell = cancel.clone();
+    let cancel_hb = cancel.clone();
+    let cancel_ctrl = cancel.clone();
+
+    let iopub_handle = tokio::spawn(async move {
         loop {
-            match shell_socket.recv().await {
-                Ok(message) => {
-                    // Try to parse as a generic message first to get the header
-                    let frames: Vec<Vec<u8>> = message.iter().map(|frame| frame.to_vec()).collect();
-                    let delim_index = match delim_index(&frames) {
-                        Ok(ix) => ix,
-                        Err(e) => {
-                            eprintln!("{e}");
-                            continue;
-                        }
-                    };
-
-                    if let Ok(raw_msg) = JupyterMessage::<serde_json::Value>::from_multipart(
-                        &frames,
-                        &config.key,
-                        &config.signature_scheme,
-                    ) {
-                        println!("Received message type: {}", raw_msg.header.msg_type);
-
-                        // Route based on message type
-                        match raw_msg.header.msg_type.as_str() {
-                            "kernel_info_request" => {
-                                crate::messages::shell::kernel_info::handle_kernel_info_request(
-                                    &config,
-                                    &mut shell_socket,
-                                    &mut iopub_socket,
-                                    raw_msg,
-                                    frames,
-                                    delim_index,
-                                )
-                                .await;
-                            }
-                            "execute_request" => {
-                                // Add +1 to the execution counter
-                                let n = exec_count
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                                    + 1;
-
-                                crate::messages::shell::execute::handle_execute_request(
-                                    &config,
-                                    &mut shell_socket,
-                                    &mut iopub_socket,
-                                    raw_msg,
-                                    frames,
-                                    delim_index,
-                                    n,
-                                )
-                                .await;
-                            }
-                            _ => {
-                                println!("Unknown message type: {}", raw_msg.header.msg_type);
-                            }
-                        }
-                    } else {
-                        println!("Failed to parse message with {} frames", frames.len());
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Shell receive error: {e}");
+            tokio::select! {
+                _ = cancel_iopub.cancelled() => {
+                    println!("IOPub loop cancelled");
                     break;
                 }
+                Some(frames) = iopub_rx.recv() => {
+                    // frames are already multipart bytes
+                    let _ = crate::messages::wire::send_bytes(&mut iopub_socket, frames).await;
+                }
+                else => break,
             }
         }
+    });
+
+    // Spawn shell handler
+    let shell_iopub_tx = iopub_tx.clone();
+    let shell_handle = tokio::spawn(async move {
+        shell_loop(
+            cancel_shell,
+            &mut shell_socket,
+            shell_iopub_tx,
+            &shell_config,
+            exec_count,
+        )
+        .await
     });
 
     // Spawn heartbeat handler
-    let heartbeat_handle = tokio::spawn(async move {
-        loop {
-            // Wait for ping message
-            match hb_socket.recv().await {
-                Ok(message) => {
-                    // Echo it back
-                    if let Err(e) = hb_socket.send(message).await {
-                        eprintln!("Heartbeat send message error: {e}");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Heartbeat receive message error: {e}");
-                    break;
-                }
-            }
-        }
+    let heartbeat_handle =
+        tokio::spawn(async move { heartbeat_loop(cancel_hb, &mut hb_socket).await });
+
+    // Spawn control handler
+    let control_iopub_tx = iopub_tx.clone();
+    let control_handler = tokio::spawn(async move {
+        control_loop(
+            cancel,
+            cancel_ctrl,
+            &mut control_socket,
+            control_iopub_tx,
+            &control_config,
+        )
+        .await
     });
 
-    // Wait for either task to complete (they should run forever)
-    tokio::select! {
-        _ = heartbeat_handle => {},
-        _ = shell_handle => {},
-    }
+    // Wait for tasks (they should run until cancelled)
+    let _ = tokio::join!(
+        heartbeat_handle,
+        shell_handle,
+        control_handler,
+        iopub_handle
+    );
 
     Ok(())
 }

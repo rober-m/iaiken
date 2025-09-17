@@ -1,9 +1,12 @@
-use crate::messages::{wire::send_bytes, ConnectionConfig, JupyterMessage, MessageHeader};
-
+use crate::messages::{ConnectionConfig, JupyterMessage, MessageHeader, wire::send_bytes};
 
 use serde::{Deserialize, Serialize};
-use zeromq::{PubSocket, RouterSocket};
+use zeromq::RouterSocket;
 
+use tokio::sync::mpsc::UnboundedSender;
+
+// TODO: I'm repeating this type cause I don't know how to import it from connection::iopub. :/
+pub type IopubTx = UnboundedSender<Vec<bytes::Bytes>>;
 
 pub const PROTOCOL_VERSION: &str = "5.3";
 const KI_STATUS: &str = "ok"; // TODO: Handle error status
@@ -82,7 +85,7 @@ pub struct HelpLink {
 pub async fn handle_kernel_info_request(
     config: &ConnectionConfig,
     shell_socket: &mut RouterSocket,
-    iopub_socket: &mut PubSocket,
+    iopub_tx: &IopubTx,
     raw_msg: JupyterMessage<serde_json::Value>,
     frames: Vec<Vec<u8>>,
     delim_index: usize,
@@ -100,11 +103,8 @@ pub async fn handle_kernel_info_request(
         "kernel_info_reply".to_string(),
     );
 
-    // IOPub: status busy
-    if let Ok(bytes_frames) =
-        raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy")
-    {
-        send_bytes(iopub_socket, bytes_frames).await.unwrap();
+    if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy") {
+        let _ = iopub_tx.send(frames);
     }
 
     println!("Sending reply with version: {}", &reply_header.version);
@@ -127,10 +127,7 @@ pub async fn handle_kernel_info_request(
         send_bytes(shell_socket, bytes_frames).await.unwrap();
     }
 
-    // IOPub: status idle
-    if let Ok(bytes_frames) =
-        raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle")
-    {
-        let _ = send_bytes(iopub_socket, bytes_frames).await;
+    if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle") {
+        let _ = iopub_tx.send(frames);
     }
 }
