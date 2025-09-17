@@ -74,7 +74,8 @@ pub async fn shell_loop(
                             .await;
                         }
                         _ => {
-                            println!("Unknown message type: {}", raw_msg.header.msg_type);
+                            println!("\n\nUnhandled shell message type: {}\n\n", raw_msg.header.msg_type);
+                            //TODO: Hanlde `history_request`?
                         }
                     }
                 } else {

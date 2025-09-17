@@ -1,5 +1,4 @@
 use tokio_util::sync::CancellationToken;
-use zeromq::PubSocket;
 use zeromq::RouterSocket;
 use zeromq::SocketRecv;
 
@@ -76,7 +75,7 @@ pub async fn control_loop(
                                 }
                             },
                             _ => {
-                                todo!()
+                                println!("\n\nUnhandled control message type: {}\n\n", raw_msg.header.msg_type);
                             }
                             }
                         }
