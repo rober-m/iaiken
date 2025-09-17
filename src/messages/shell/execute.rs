@@ -1,11 +1,4 @@
-use crate::messages::{ConnectionConfig, JupyterMessage, MessageHeader, wire::send_bytes};
 use serde::{Deserialize, Serialize};
-use zeromq::{PubSocket, RouterSocket};
-
-use tokio::sync::mpsc::UnboundedSender;
-
-// TODO: I'm repeating this type cause I don't know how to import it from connection::iopub. :/
-pub type IopubTx = UnboundedSender<Vec<bytes::Bytes>>;
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#execute
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -24,61 +17,4 @@ pub struct ExecuteReply {
     pub execution_count: u32, // Incremental counter
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_expressions: Option<serde_json::Value>,
-}
-
-pub async fn handle_execute_request(
-    config: &ConnectionConfig,
-    shell_socket: &mut RouterSocket,
-    iopub_tx: &IopubTx,
-    raw_msg: JupyterMessage<serde_json::Value>,
-    frames: Vec<Vec<u8>>,
-    delim_index: usize,
-    execution_count: u32,
-) {
-    println!("Handling execute_request");
-    // Parse the execute request
-    if let Ok(exec_msg) = JupyterMessage::<ExecuteRequest>::from_multipart(
-        &frames,
-        &config.key,
-        &config.signature_scheme,
-    ) {
-        println!("Executing code: {}", exec_msg.content.code);
-
-        if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy") {
-            let _ = iopub_tx.send(frames);
-        }
-
-        // For now, just echo the code back as output
-        // TODO: Actually compile/execute Aiken code
-
-        // Create execute reply
-        let reply = ExecuteReply {
-            status: "ok".to_string(),
-            execution_count,
-            user_expressions: None,
-        };
-
-        let reply_header =
-            MessageHeader::new(raw_msg.header.session.clone(), "execute_reply".to_string());
-
-        let reply_msg = JupyterMessage {
-            header: reply_header,
-            parent_header: Some(raw_msg.header.clone()),
-            metadata: serde_json::Value::Object(serde_json::Map::new()),
-            content: reply,
-        };
-
-        if let Ok(bytes_frames) = reply_msg.to_envelope_multipart(
-            frames,
-            delim_index,
-            &config.key,
-            &config.signature_scheme,
-        ) {
-            send_bytes(shell_socket, bytes_frames).await.unwrap();
-        };
-
-        if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "idle") {
-            let _ = iopub_tx.send(frames);
-        }
-    }
 }

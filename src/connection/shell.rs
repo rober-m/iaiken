@@ -2,13 +2,16 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
 use tokio_util::sync::CancellationToken;
+use zeromq::RouterSocket;
 use zeromq::SocketRecv;
-use zeromq::{PubSocket, RouterSocket};
 
 use crate::messages::wire::delim_index;
 use crate::messages::{ConnectionConfig, JupyterMessage};
 
 use super::iopub::IopubTx;
+
+mod execute;
+mod kernel_info;
 
 pub async fn shell_loop(
     cancel_shell: CancellationToken,
@@ -46,7 +49,7 @@ pub async fn shell_loop(
                     // Route based on message type
                     match raw_msg.header.msg_type.as_str() {
                         "kernel_info_request" => {
-                            crate::messages::shell::kernel_info::handle_kernel_info_request(
+                            kernel_info::handle_kernel_info_request(
                                 &config,
                                 shell_socket,
                                 &iopub_tx,
@@ -62,7 +65,7 @@ pub async fn shell_loop(
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                                 + 1;
 
-                            crate::messages::shell::execute::handle_execute_request(
+                            execute::handle_execute_request(
                                 &config,
                                 shell_socket,
                                 &iopub_tx,
@@ -71,7 +74,7 @@ pub async fn shell_loop(
                                 delim_index,
                                 n,
                             )
-                            .await;
+                            .await.unwrap();
                         }
                         _ => {
                             println!("\n\nUnhandled shell message type: {}\n\n", raw_msg.header.msg_type);

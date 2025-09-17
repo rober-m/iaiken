@@ -76,6 +76,7 @@ pub async fn control_loop(
                             },
                             _ => {
                                 println!("\n\nUnhandled control message type: {}\n\n", raw_msg.header.msg_type);
+                                //Unhandled control message type: kernel_info_request
                             }
                             }
                         }

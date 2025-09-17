@@ -1,4 +1,5 @@
 mod connection;
+mod eval;
 mod messages;
 
 mod install;
