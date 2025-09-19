@@ -1,20 +1,17 @@
-[package]
-name = "aiken-kernel"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/*"]
+resolver = "3"
 
-[dependencies]
-tokio = { version = "1.47.1", features = ["full"] }
-zeromq = "0.4.1"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.143"
-uuid = { version = "1.18.1", features = ["v4"] }
-anyhow = "1.0.99"
-clap = { version = "4.5.47", features = ["derive"] }
-chrono = { version = "0.4", features = ["serde"] }
-bytes = "1.10.1"
-dirs = "6.0.0"
-hmac = "0.12.1"
-sha2 = "0.10.9"
-hex = "0.4.3"
-tokio-util = {version = "0.7.16", features = ["rt"]}
+[workspace.package]
+description = "Aiken REPL and Jupyter Kernel"
+documentation = "https://aiken-lang.org"
+version = "0.0.1"
+edition = "2024"
+repository = "https://github.com/rober-m/iaiken"
+homepage = "https://github.com/rober-m/iaiken"
+license = "Apache-2.0"
+authors = [
+    "Robertino Martinez <r@robertinom.com>"
+]
+rust-version = "1.88.0"
+

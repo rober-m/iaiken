@@ -27,26 +27,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aiken-kernel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "chrono",
- "clap",
- "dirs",
- "hex",
- "hmac",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "uuid",
- "zeromq",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -476,6 +456,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "iaiken"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chrono",
+ "clap",
+ "dirs",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zeromq",
 ]
 
 [[package]]
