@@ -7,7 +7,7 @@ mod install;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "aiken-kernel")]
+#[command(name = "iaiken")]
 #[command(about = "Jupyter kernel for Aiken programming language")]
 pub struct Cli {
     /// Path to Jupyter connection file
@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         (None, true, false) => install::install_kernel(),
         (None, false, true) => install::uninstall_kernel(),
         _ => {
-            eprintln!("Usage: aiken-kernel --connection-file=<file> | --install | --uninstall");
+            eprintln!("Usage: iaiken --connection-file=<file> | --install | --uninstall");
             std::process::exit(1);
         }
     }
