@@ -15,7 +15,7 @@
 - [x] Create `execution` communication
 - [x] Track execution_count and emit execute_input + stream/execute_result
 - [x] Implement minimal Aiken executor (shell out) and map stdout/stderr to IOPub
-- [ ] Integrate aiken-repl
+- [x] Integrate aiken-repl
 - [ ] Hanlde execute error path properly (IOPub error + execute_reply error)
 - [ ] Implement uninstall (remove kernelspec dir)
 - [ ] Add tracing logs + env filter and trim printlns

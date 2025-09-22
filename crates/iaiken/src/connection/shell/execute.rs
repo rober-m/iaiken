@@ -1,6 +1,6 @@
 use crate::{
     connection::iopub::IopubTx,
-    eval::{self, execute_aiken_code},
+    eval::execute_aiken_code,
     messages::{
         ConnectionConfig, JupyterMessage, MessageHeader,
         shell::execute::{ExecuteReply, ExecuteRequest},
@@ -31,10 +31,7 @@ pub async fn handle_execute_request(
             .to_iopub_status(&config.key, &config.signature_scheme, "busy")
             .and_then(|f| Ok(iopub_tx.send(f)));
 
-        // For now, just echo the code back as output
-        // TODO: Actually compile/execute Aiken code
-        // minimal placeholder output while executor is stubbed
-        let execution_result = execute_aiken_code(exec_msg.content.code);
+        let execution_result = execute_aiken_code(&exec_msg.content.code).await;
 
         let _ = raw_msg
             .to_iopub_stream(
