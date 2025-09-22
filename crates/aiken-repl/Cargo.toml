@@ -1,0 +1,21 @@
+[package]
+name = "aiken-repl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+
+
+[dependencies]
+aiken-project = { git = "https://github.com/aiken-lang/aiken", package = "aiken-project", version = "1.1.19" }
+aiken-lang = { git = "https://github.com/aiken-lang/aiken", package = "aiken-lang", version = "1.1.19" }
+uplc = { git = "https://github.com/aiken-lang/aiken", package = "uplc", version = "1.1.19" }
+thiserror = "2.0.16"
+tempfile = "3.22.0"
+hex.workspace = true
+miette.workspace = true

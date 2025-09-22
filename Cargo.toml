@@ -15,3 +15,6 @@ authors = [
 ]
 rust-version = "1.88.0"
 
+[workspace.dependencies]
+hex = "0.4.3"
+miette = { version = "7.6.0", features = ["fancy"]}
