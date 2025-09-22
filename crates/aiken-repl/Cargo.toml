@@ -19,3 +19,4 @@ thiserror = "2.0.16"
 tempfile = "3.22.0"
 hex.workspace = true
 miette.workspace = true
+rustyline = "17.0.1"

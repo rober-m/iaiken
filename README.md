@@ -5,7 +5,8 @@
 - [x] Build repl library using temporary aien-project::Project
 - [x] Handle execution history (up/down arrows)
 - [x] Provide introspection functionality (ctx, re-definitions)
-- [ ] Create `aiken-repl` binary
+- [x] Create `aiken-repl` binary
+- [x] Remove noise from results
 - [ ] Create README
 
 ### iaiken
@@ -18,6 +19,7 @@
 - [x] Integrate aiken-repl
 - [ ] Hanlde execute error path properly (IOPub error + execute_reply error)
 - [ ] Implement uninstall (remove kernelspec dir)
+- [ ] Add syntax highlighting
 - [ ] Add tracing logs + env filter and trim printlns
 - [ ] Create README
 

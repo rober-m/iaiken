@@ -1,4 +1,4 @@
-use aiken_repl::{ReplError, ReplEvaluator};
+use aiken_repl::evaluator::{ReplError, ReplEvaluator};
 use miette::{GraphicalReportHandler, GraphicalTheme};
 use std::sync::{Mutex, OnceLock};
 
