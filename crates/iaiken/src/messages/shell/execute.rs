@@ -12,9 +12,24 @@ pub struct ExecuteRequest {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ExecuteReply {
-    pub status: String,       // "ok" or "error"
-    pub execution_count: u32, // Incremental counter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_expressions: Option<serde_json::Value>,
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Ok,
+    Error,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum ExecuteReply {
+    Ok {
+        execution_count: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_expressions: Option<serde_json::Value>,
+    },
+    Error {
+        execution_count: u32,
+        ename: String,
+        evalue: String,
+        traceback: Vec<String>,
+    },
 }

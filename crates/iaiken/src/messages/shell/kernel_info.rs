@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: &str = "5.4";
+pub const KI_LI_MIMETYPE: &str = "text/x-aiken";
 const KI_STATUS: &str = "ok"; // TODO: Handle error status
 const KI_IMPLEMENTATION: &str = "aiken";
 const KI_IMPLEMENTATION_VERSION: &str = "0.0.1";
@@ -8,7 +9,6 @@ const KI_BANNER: &str = "Aiken Kernel v0.1.0\nCardano Smart Contract Language";
 const KI_DEBUGGER: bool = false;
 const KI_LI_NAME: &str = "aiken";
 const KI_LI_VERSION: &str = "0.0.1"; //TODO: Change to actual Aiken version
-const KI_LI_MIMETYPE: &str = "text/x-aiken";
 const KI_LI_FILE_EXT: &str = ".ak";
 
 // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#kernel-info

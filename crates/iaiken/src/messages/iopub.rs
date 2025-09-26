@@ -1,6 +1,8 @@
 use crate::messages::crypto::sign_message;
 use crate::messages::{JupyterMessage, MessageHeader};
 
+use super::shell::kernel_info::KI_LI_MIMETYPE;
+
 fn build_pub(
     header: MessageHeader,
     parent_header: Option<crate::messages::MessageHeader>,
@@ -51,6 +53,7 @@ impl JupyterMessage<serde_json::Value> {
     }
 
     // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#streams-stdout-stderr-etc
+    #[allow(dead_code)]
     pub fn to_iopub_stream(
         &self,
         key: &str,
@@ -66,21 +69,58 @@ impl JupyterMessage<serde_json::Value> {
     }
 
     // DOCS: https://jupyter-client.readthedocs.io/en/latest/messaging.html#id7
+    #[allow(dead_code)]
     pub fn to_iopub_execute_result(
         &self,
         key: &str,
         scheme: &str,
         execution_count: u32,
-        data: serde_json::Value,
+        data: String,
         metadata: serde_json::Value,
     ) -> anyhow::Result<Vec<bytes::Bytes>> {
         let header = MessageHeader::new(self.header.session.clone(), "execute_result".to_string());
         let parent = Some(self.header.clone());
+
+        // Create MIME bundle with both text/plain and text/x-aiken
+        let mut data_map = serde_json::Map::new();
+        data_map.insert("text/plain".into(), serde_json::Value::String(data.clone()));
+        data_map.insert(KI_LI_MIMETYPE.to_string(), serde_json::Value::String(data));
+
         let content = serde_json::json!({
             "execution_count": execution_count,
-            "data": data,
+            "data": data_map,
             "metadata": metadata
         });
+        build_pub(
+            header,
+            parent,
+            serde_json::Value::Object(serde_json::Map::new()),
+            content,
+            key,
+            scheme,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub fn to_iopub_display_data(
+        &self,
+        key: &str,
+        scheme: &str,
+        data: String,
+        metadata: serde_json::Value,
+    ) -> anyhow::Result<Vec<bytes::Bytes>> {
+        let header = MessageHeader::new(self.header.session.clone(), "display_data".to_string());
+        let parent = Some(self.header.clone());
+
+        let mut data_map = serde_json::Map::new();
+        data_map.insert("text/plain".into(), serde_json::Value::String(data.clone()));
+        data_map.insert(KI_LI_MIMETYPE.into(), serde_json::Value::String(data));
+
+        let content = serde_json::json!({
+            "data": data_map,
+            "metadata": metadata
+        });
+
         build_pub(
             header,
             parent,
@@ -97,12 +137,13 @@ impl JupyterMessage<serde_json::Value> {
         key: &str,
         scheme: &str,
         ename: &str,
-        evalue: &str,
-        traceback: &[String],
+        evalue: &String,
+        traceback: &Vec<String>,
     ) -> anyhow::Result<Vec<bytes::Bytes>> {
         let header = MessageHeader::new(self.header.session.clone(), "error".to_string());
         let parent = Some(self.header.clone());
         let metadata = serde_json::Value::Object(serde_json::Map::new());
+
         let content =
             serde_json::json!({ "ename": ename, "evalue": evalue, "traceback": traceback });
         build_pub(header, parent, metadata, content, key, scheme)

@@ -1,14 +1,12 @@
-use crate::messages::{
-    ConnectionConfig, JupyterMessage, MessageHeader, shell::kernel_info::KernelInfoReply,
-    wire::send_bytes,
+use crate::{
+    connection::iopub::IopubTx,
+    messages::{
+        ConnectionConfig, JupyterMessage, MessageHeader, shell::kernel_info::KernelInfoReply,
+        wire::send_bytes,
+    },
 };
 
 use zeromq::RouterSocket;
-
-use tokio::sync::mpsc::UnboundedSender;
-
-// TODO: I'm repeating this type cause I don't know how to import it from connection::iopub. :/
-pub type IopubTx = UnboundedSender<Vec<bytes::Bytes>>;
 
 pub async fn handle_kernel_info_request(
     config: &ConnectionConfig,
@@ -34,12 +32,6 @@ pub async fn handle_kernel_info_request(
     if let Ok(frames) = raw_msg.to_iopub_status(&config.key, &config.signature_scheme, "busy") {
         let _ = iopub_tx.send(frames);
     }
-
-    println!("Sending reply with version: {}", &reply_header.version);
-    println!(
-        "Reply content: {}",
-        serde_json::to_string_pretty(&reply).unwrap_or("serialize error".to_string())
-    );
 
     // Create reply message
     let reply_msg = JupyterMessage {

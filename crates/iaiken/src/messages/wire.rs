@@ -1,4 +1,4 @@
-use super::{crypto::sign_message, JupyterMessage, MessageHeader};
+use super::{JupyterMessage, MessageHeader, crypto::sign_message};
 
 pub async fn send_bytes<U: zeromq::Socket + zeromq::SocketSend>(
     socket: &mut U,

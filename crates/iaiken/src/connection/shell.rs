@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 use tokio_util::sync::CancellationToken;
 use zeromq::RouterSocket;
@@ -60,10 +61,10 @@ pub async fn shell_loop(
                             .await;
                         }
                         "execute_request" => {
-                            // Add +1 to the execution counter
-                            let n = exec_count
-                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                                + 1;
+                            // Increment execution counter and get the new value
+                            // The `Ordering` is probably too strict for this case.
+                            exec_count.fetch_add(1, Ordering::SeqCst);
+                            let n = exec_count.load(Ordering::SeqCst);
 
                             execute::handle_execute_request(
                                 &config,
