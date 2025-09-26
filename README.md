@@ -1,8 +1,8 @@
-**`iaiken` (interactive Aiken) is a Jupyter kernel and REPL for the [Aiken](aiken-lang.org) smart contract programming language.**
+# Jupyter kernel and REPL for the [Aiken](aiken-lang.org) smart contract programming language
 
 This project provides two main tools for interactive Aiken development:
 
-1. **iaiken** - A Jupyter kernel that allows running Aiken code in Jupyter notebooks (depends on `aiken-repl`).
+1. **iaiken (interactive Aiken)** - A Jupyter kernel that allows running Aiken code in Jupyter notebooks (depends on `aiken-repl`).
 2. **aiken-repl** - A standalone REPL (Read-Eval-Print Loop) for interactive Aiken development.
 
 Both tools leverage Aiken's existing compilation infrastructure to provide real-time type checking and code evaluation.
