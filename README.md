@@ -1,4 +1,4 @@
-# Jupyter kernel and REPL for the [Aiken](aiken-lang.org) smart contract programming language
+# Jupyter kernel and REPL for the [Aiken](https://aiken-lang.org) smart contract programming language
 
 This project provides two main tools for interactive Aiken development:
 
