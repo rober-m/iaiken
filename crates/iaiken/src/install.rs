@@ -1,3 +1,5 @@
+use std::{fs, path::PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 // Kernel specification for installation
@@ -26,13 +28,7 @@ impl KernelSpec {
     }
 }
 
-pub fn install_kernel() -> anyhow::Result<()> {
-    use std::fs;
-
-    // Get current executable path
-    let exe_path = std::env::current_exe()?.to_string_lossy().to_string();
-
-    // Find Jupyter kernels directory
+fn get_aiken_kernel_dir() -> anyhow::Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?;
 
@@ -43,14 +39,28 @@ pub fn install_kernel() -> anyhow::Result<()> {
         .join("kernels")
         .join("aiken");
 
+    Ok(kernels_dir)
+}
+
+pub fn install_kernel() -> anyhow::Result<()> {
+    use std::fs;
+
+    println!("Installing Aiken kernell...");
+
+    // Get current executable path
+    let exe_path = std::env::current_exe()?.to_string_lossy().to_string();
+
+    // Find Jupyter kernel directory
+    let kernel_dir = get_aiken_kernel_dir()?;
+
     // Create directory if it doesn't exist
-    fs::create_dir_all(&kernels_dir)?;
+    fs::create_dir_all(&kernel_dir)?;
 
     // Create kernel spec
     let spec = KernelSpec::new(&exe_path);
 
     // Write kernel.json
-    let kernel_json_path = kernels_dir.join("kernel.json");
+    let kernel_json_path = kernel_dir.join("kernel.json");
     let spec_json = serde_json::to_string_pretty(&spec)?;
     fs::write(&kernel_json_path, spec_json)?;
 
@@ -61,7 +71,23 @@ pub fn install_kernel() -> anyhow::Result<()> {
 }
 
 pub fn uninstall_kernel() -> anyhow::Result<()> {
-    println!("uninstalling Aiken kernell");
-    // TODO: Remove kernel.json spec file
+    println!("Uninstalling Aiken kernel...");
+
+    // Find Jupyter kernel directory and read file contents
+    let kernel_dir = get_aiken_kernel_dir()?;
+    let kernel_file_contents = fs::read(kernel_dir.join("kernel.json"))?;
+
+    println!("Deleting {}...", kernel_dir.to_string_lossy());
+
+    std::fs::remove_dir_all(&kernel_dir)?;
+
+    println!("Aiken kernel uninstalled successfully!");
+
+    // Show the user where this binary is located
+    let kernel_file_parsed: serde_json::Value = serde_json::from_slice(&kernel_file_contents)?;
+    if let Some(exe_path) = kernel_file_parsed.get("argv").and_then(|argv| argv.get(0)) {
+        println!("You can now delete the kernel binary in: {}", exe_path);
+    }
+
     Ok(())
 }

@@ -19,7 +19,7 @@
 - [x] Integrate aiken-repl
 - [x] Hanlde execute error path properly (IOPub error + execute_reply error)
 - [ ] Implement completions
-- [ ] Implement uninstall (remove kernelspec dir)
+- [x] Implement uninstall (remove kernelspec dir)
 - [ ] ~~Add syntax highlighting~~ Not part of the kernel's job
 - [ ] Add tracing logs + env filter and trim printlns
 - [ ] Create README
