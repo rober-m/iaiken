@@ -17,9 +17,10 @@
 - [x] Track execution_count and emit execute_input + stream/execute_result
 - [x] Implement minimal Aiken executor (shell out) and map stdout/stderr to IOPub
 - [x] Integrate aiken-repl
-- [ ] Hanlde execute error path properly (IOPub error + execute_reply error)
+- [x] Hanlde execute error path properly (IOPub error + execute_reply error)
+- [ ] Implement completions
 - [ ] Implement uninstall (remove kernelspec dir)
-- [ ] Add syntax highlighting
+- [ ] ~~Add syntax highlighting~~ Not part of the kernel's job
 - [ ] Add tracing logs + env filter and trim printlns
 - [ ] Create README
 
