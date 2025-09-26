@@ -7,21 +7,14 @@ This project provides two main tools for interactive Aiken development:
 
 Both tools leverage Aiken's existing compilation infrastructure to provide real-time type checking and code evaluation.
 
-### iaiken (Jupyter Kernel)
+### iaiken features
 
-The main Jupyter kernel that implements the Jupyter messaging protocol using ZeroMQ sockets. It provides:
-
-#### Features
-
+- [x] **Basic Jupyter integration** - This implementation covers all the basic Jupyter protocol messages
 - [x] **Definition Persistence** - Define functions, constants, and types that persist across evaluations
 - [x] **Type Information** - Display both values and their types for rich feedback
 - [x] **Rich Error Reporting** - Rich error reporting with source code context
 
-### aiken-repl (REPL Evaluator)
-
-A REPL evaluator library that provides interactive Aiken code execution.
-
-#### Features
+### aiken-repl features
 
 - [x] **Interactive Shell** - Standalone REPL with rustyline for line editing
 - [x] **Context Management** - View and reset current evaluation context
