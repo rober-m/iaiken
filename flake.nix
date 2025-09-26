@@ -27,7 +27,7 @@
 
       cargoTomlContents = builtins.readFile ./Cargo.toml;
 
-      version = (builtins.fromTOML cargoTomlContents).package.version;
+      version = (builtins.fromTOML cargoTomlContents).workspace.package.version;
       rustVersion = "1.88.0";
 
       rustToolchain = pkgs.rust-bin.stable.${rustVersion}.default;
@@ -46,10 +46,15 @@
         nativeBuildInputs = with pkgs; [pkg-config openssl.dev];
 
         src = pkgs.lib.cleanSourceWith {src = self;};
-        doCheck = false; # don’t run cargo test
-        CARGO_BUILD_TESTS = "false"; # don’t even compile test binaries
+        doCheck = false; # don't run cargo test
+        CARGO_BUILD_TESTS = "false"; # don't even compile test binaries
 
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "aiken-lang-1.1.19" = "sha256-PZ4AbgMmUKyfeQXph0StWdBBPb1uuDStuA2dUHMSX/g=";
+          };
+        };
 
         meta = with pkgs.lib; {
           description = "Jupyter kernel for Aiken smart contract language";
@@ -68,10 +73,15 @@
         nativeBuildInputs = with pkgs; [pkg-config openssl.dev];
 
         src = pkgs.lib.cleanSourceWith {src = self;};
-        doCheck = false; # don’t run cargo test
-        CARGO_BUILD_TESTS = "false"; # don’t even compile test binaries
+        doCheck = false; # don't run cargo test
+        CARGO_BUILD_TESTS = "false"; # don't even compile test binaries
 
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "aiken-lang-1.1.19" = "sha256-PZ4AbgMmUKyfeQXph0StWdBBPb1uuDStuA2dUHMSX/g=";
+          };
+        };
 
         meta = with pkgs.lib; {
           description = "REPL for the Aiken smart contract language";
